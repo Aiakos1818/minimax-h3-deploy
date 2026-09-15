@@ -934,12 +934,14 @@
     1,
     1,
     false,
+    true,
+    true,
     false,
+    "SAGE_FP16",
     false,
-    false,
-    "TORCH_FLASH",
-    false,
-    false
+    true,
+    "off",
+    0
    ]
   },
   {

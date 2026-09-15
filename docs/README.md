@@ -7,8 +7,8 @@ MiniMax-H3 双 RTX 2080 Ti 22G（NVLink）raylight TP 部署的工作节点文�
 
 | # | 文档 | 脚本 | 阶段 | 状态 |
 |---|---|---|---|---|
-| 1 | [gen.md](gen.md) | `gen.py` | 单机/单卡，官方 `MiniMaxH3ImageToVideo` workflow（`api_local_*.json`）驱动，无续接 | 历史（workflow 模板已清理） |
-| 2 | [gen_dual.md](gen_dual.md) | `gen_dual.py` | 双卡 raylight FSDP/Ulysses 单任务（含部署/版本锁/性能/CLIP offload 归档） | 历史（能力移交 v1/v2） |
+| 1 | [gen.md](gen.md) | ~~`gen.py`~~ | 单机/单卡，官方 `MiniMaxH3ImageToVideo` workflow 驱动，无续接 | 历史（脚本与能力均已退役） |
+| 2 | [gen_dual.md](gen_dual.md) | ~~`gen_dual.py`~~ | 双卡 raylight FSDP/Ulysses 单任务（含部署/版本锁/性能/CLIP offload 归档） | 历史（能力移交 v1/v2/v3） |
 | 3 | [chain_director_v1.md](chain_director_v1.md) | `chain_director_v1.py` | Herrgotts masked-AV 多段续接链 v1（逐段 queue，每段重载） | 自 2026-09-05 不再维护 |
 | 4 | [chain_director_v2.md](chain_director_v2.md) | `chain_director_v2.py` | persist 模式链（FSDP 段间驻留）+ 首段素材分流（ref2va 参考图/视频/音频） | 维护中（ref2va 走这里） |
 | 5 | [chain_director_v2.md](chain_director_v2.md) | `chain_director_v2_web.py` | 局域网 Web 控制台（`:8189`，stdlib-only）：参数镜像 + 上传 + 串行队列 + 续拍 + 在线预览 | 现行（v2/ref2va） |

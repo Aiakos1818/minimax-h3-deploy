@@ -1,8 +1,9 @@
 # 工作节点 1：gen.py（单机单卡官方图驱动）
 
 > 阶段：MiniMax-H3 部署最早的单任务生成器。直接复用官方 ComfyUI workflow
-> （`MiniMaxH3ImageToVideo`），单机/单卡跑通 t2v/i2v。历史角色，workflow
-> 模板 `api_local_*.json` 已随清理删除，本文件为用法与结论归档。
+> （`MiniMaxH3ImageToVideo`），单机/单卡跑通 t2v/i2v。历史角色：**`scripts/gen.py`
+> 已删除**（单任务用 `chain_director_v3.py --segments 1`，官方图仍可从浏览器或
+> `workflows/api/api_video_minimax_h3_{t2v,i2v}.json` 手工 POST），本文件为用法与结论归档。
 
 ## 职责
 

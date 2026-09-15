@@ -141,8 +141,8 @@ cat start.sh
 ```
 nodes/                            # ← ComfyUI custom_nodes/{comfyui_h3_multigpu_clip,h3_vae_unload} 软链指向这里
 workflows/                        # ← ComfyUI user/default/workflows 软链指向这里（= 浏览器的工作流列表）
-workflows/api/                    # API 格式模板（gen.py/gen_dual.py 用；浏览器默认不列出）
-scripts/                          # chain_director_v3（续接链：UNET 常驻 + CLIP 按需上卡）/ v2（persist 对照）、web 控制台 v3_web(:8190) / v2_web(:8189)、gen/gen_dual、start.sh/stop.sh（双卡启动/停止，与 ~/ComfyUI-Deploy 的同名文件一致）
+workflows/api/                    # 与 workflows/*.json 一一对应的 API 格式模板（手工 POST/curl 用；浏览器默认不列出；见 api/README.md）
+scripts/                          # chain_director_v3（续接链：UNET 常驻 + CLIP 按需上卡）/ v2（persist 对照）、web 控制台 v3_web(:8190) / v2_web(:8189)、ui2api.py（UI→API 转换）、start.sh/stop.sh（双卡启动/停止，与 ~/ComfyUI-Deploy 的同名文件一致）
 docs/                             # 部署与踩坑文档（audio / chain_director_v1-v3 / gen_dual / gen）
 ```
 

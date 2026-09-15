@@ -3,7 +3,9 @@
 > 阶段：双卡 FSDP/Ulysses 单段生成。包含整个双卡部署/版本锁/性能调优记录
 > （并入原 `DUAL_TP_NOTES.md`），以及为链式任务装载优化做的 CLIP SSD-offload
 > 往返实验归档（并入原 `clip_offload_experiment_20260904.md`）。
-> 脚本能力此后被 chain_director v1/v2 的多段链继承；gen_dual 保留为单任务双卡 CLI。
+> 脚本能力此后被 chain_director v1/v2/v3 的多段链继承；**`scripts/gen_dual.py` 已删除**
+> （单任务直接用 `chain_director_v3.py --segments 1`），其 API 模板保留为
+> `workflows/api/api_video_minimax_h3_raylight_fl2v.json`。
 
 ## 一、gen_dual.py 职责与用法
 
@@ -349,3 +351,6 @@ dispatch，见 chain_director_v1.md）与 **v2 persist**（同任务段间 FSDP 
 
 gen.py / gen_dual.py 是单任务驱动。多段续接与素材（图锚/参考音视频）能力此后移交
 chain_director_v1/v2（见对应文档）；audio 专项结论在 audio.md。
+
+**2026-09-15：两个脚本已删除**。单任务改用 `chain_director_v3.py --segments 1`
+（常驻 UNet、int4 CLIP、cond 缓存）；本文档保留全部部署/版本锁/调优/CLIP-offload 结论。
