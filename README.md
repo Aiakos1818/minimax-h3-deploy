@@ -28,9 +28,10 @@ MiniMax H3（原生音视频生成）在 **双 RTX 2080 Ti 22G（NVLink）** 上
 | einops / safetensors / transformers | 0.8.2 / 0.8.0 / 5.16.1 | 其余依赖随 ComfyUI requirements |
 
 ```bash
-pip install torch==2.14.0 torchvision==0.29.0 --index-url https://download.pytorch.org/whl/cu130
-pip install comfy-kitchen comfy-aimdo ray xfuser einops safetensors
-# sageattention：sm75 编译（见第 2 步的 fork）
+# 先装 ComfyUI 自带 requirements.txt，再装我们的补充依赖
+pip install -r ComfyUI/requirements.txt
+pip install -r requirements-h3.txt          # 见本仓库同目录（torch 需 cu130 轮子）
+# sageattention：sm75 需源码编译（见第 2 步的 fork）
 ```
 
 ### 2. 拉取代码

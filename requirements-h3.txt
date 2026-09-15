@@ -1,0 +1,16 @@
+# MiniMax-H3-Deploy 关键依赖（先装 ComfyUI 自带的 requirements.txt）
+#
+# torch 必须用 cu130 轮子（comfy-kitchen 对 20 系 GPU 的优化内核要求 cu130+）：
+#   pip install torch==2.14.0 torchvision==0.29.0 --index-url https://download.pytorch.org/whl/cu130
+# sageattention 在 sm75 上需要源码编译，见 README 第 2 步的 fork。
+torch==2.14.0
+torchvision==0.29.0
+triton==3.8.0
+comfy-kitchen==0.2.31
+comfy-aimdo==0.4.15
+ray==2.58.0
+xfuser==0.4.5
+sageattention==2.1.2
+transformers==5.16.1
+einops==0.8.2
+safetensors==0.8.0
