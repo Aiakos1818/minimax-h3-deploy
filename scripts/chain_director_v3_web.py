@@ -178,6 +178,7 @@ class ComfyHealth:
         self.base = base
         self._lock = threading.Lock()
         self._cached = (False, None, 0.0)
+        self._vram = []
         self._ts = 0.0
 
     def check(self):
@@ -185,15 +186,29 @@ class ComfyHealth:
             if time.time() - self._ts < 5:
                 return self._cached
         t0 = time.time()
+        vram = []
         try:
-            urllib.request.urlopen(self.base + "/system_stats", timeout=3).read()
+            raw = json.loads(urllib.request.urlopen(self.base + "/system_stats", timeout=3).read())
             up, ms = True, int((time.time() - t0) * 1000)
+            for dev in (raw.get("devices") or []):
+                total = dev.get("vram_total") or 0
+                if not total:
+                    continue
+                vram.append({"name": (dev.get("name") or "?").split(" : ")[0],
+                             "used": total - (dev.get("vram_free") or 0), "total": total})
         except Exception:
             up, ms = False, None
         with self._lock:
             self._cached = (up, ms, time.time())
+            self._vram = vram
             self._ts = time.time()
         return self._cached
+
+    def vram(self):
+        """Per-device VRAM from the same /system_stats call check() caches."""
+        self.check()
+        with self._lock:
+            return self._vram
 
     def running_prompts(self):
         """Number of prompts ComfyUI is executing right now (or None if down)."""
@@ -208,6 +223,8 @@ class ComfyHealth:
 # stage hints parsed out of the driver log
 # --------------------------------------------------------------------------
 _STAGE_PATTERNS = [
+    (r"\[resident\] reusing service", "复用常驻服务(免冷启动)"),
+    (r"\[resident\] leaving ComfyUI up", "常驻中(显存未释放)"),
     (r"\[clear\] stopping", "清场中: 重启 ComfyUI"),
     (r"service up after", "清场完成(服务已就绪)"),
     (r"\[clip(\d+)\] submit", "第 %s 段: 提交生成"),
@@ -296,7 +313,7 @@ class Manager:
             job.setdefault("log", os.path.join(jdir, "log.txt"))
             if not st or st.get("status") == "running":
                 job["st"].update(status="interrupted", ended=NOW(),
-                                 err="web 重启中断: GPU 残留由下个任务 --clear restart 清场")
+                                 err="web 重启中断: 残留状态由下个任务接管(pid/epoch 校验后复用或重建)")
                 self.persist_status(job)
             job.setdefault("child", None)
             self.jobs[d] = job
@@ -581,6 +598,8 @@ class Manager:
             a += ["--seed", str(p["seed"])]
         if p.get("merge"):
             a += ["--merge"]
+        if p.get("stop_when_done"):
+            a += ["--stop-when-done"]
         for f in staged.get("first_image", []):
             a += ["--first-image", f]
         for f in staged.get("last_image", []):
@@ -606,6 +625,7 @@ class Manager:
             ext = external_chain_pids(self.children)
         up, ms, _ = self.comfy.check()
         return {"server_ts": NOW(), "comfy": {"up": up, "ms": ms},
+                "vram": self.comfy.vram(),
                 "busy_external": ext, "blocking": self.blocking_busy(),
                 "current": cur, "queue": q}
 
@@ -757,6 +777,7 @@ def build_cfg(fields, files, manager, form_tag_hint=None, inherit_cfg=None):
         if len(_rows) > seg:
             beats = "\n".join(_rows[:seg])
     merge = _to_bool(_first(fields, "merge"))
+    stop_when_done = _to_bool(_first(fields, "stop_when_done"))
     clean_slots = _to_bool(_first(fields, "clean_slots"), True)
 
     # ---- files -> staged upload dirs ----
@@ -821,7 +842,7 @@ def build_cfg(fields, files, manager, form_tag_hint=None, inherit_cfg=None):
     return {"tag": tag, "engine": engine, "params": {
                 "prompt": prompt, "beats": beats, "segments": seg, "dur": dur,
                 "width": w, "height": h, "steps": steps, "seed": seed,
-                "merge": merge},
+                "merge": merge, "stop_when_done": stop_when_done},
             "clean_slots": clean_slots, "continue_of": None, "duplicate_of": None,
             "staged_files": staged, "base_slots": {},
             "orders": parse_orders(fields) if inherit_cfg is not None else None}
@@ -1086,6 +1107,18 @@ def make_handler(mgr):
                 else:
                     self._err(404, "file not found")
                 return
+            if u.path in ("/api/service/stop", "/api/slots/clear"):
+                if mgr.blocking_busy() or mgr.current:
+                    self._send_json(409, {"ok": False, "msg": "有任务在跑, 先取消或等它结束"}); return
+                if u.path == "/api/service/stop":
+                    subprocess.run(["bash", os.path.expanduser("~/ComfyUI-Deploy/stop.sh")], check=False)
+                    self._send_json(200, {"ok": True, "msg": "已停止 ComfyUI, 显存已释放"}); return
+                removed = 0
+                for f in sorted(glob.glob(os.path.join(mgr.root, "output/h3_continuous/chain_*.safetensors"))):
+                    os.remove(f)
+                    removed += 1
+                print("[web] slots cleared: %d" % removed, flush=True)
+                self._send_json(200, {"ok": True, "msg": "已清空 %d 个槽位" % removed}); return
             if u.path != "/api/run":
                 self._err(404, "not found")
                 return
@@ -1201,8 +1234,21 @@ def make_handler(mgr):
     return H
 
 
+def _entry(path, out_root):
+    return {"rel": os.path.relpath(path, out_root).replace("\\", "/"),
+            "name": os.path.basename(path), "size": os.path.getsize(path),
+            "ts": time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(path)))}
+
+
 def outputs_listing(mgr):
     out_root = os.path.join(mgr.root, "output")
+    singles = []
+    for p in sorted(glob.glob(os.path.join(out_root, "video", "*.mp4")), key=os.path.getmtime, reverse=True):
+        if os.path.isfile(p):
+            singles.append(_entry(p, out_root))
+    slots = []
+    for p in sorted(glob.glob(os.path.join(out_root, "h3_continuous", "chain_*.safetensors"))):
+        slots.append(_entry(p, out_root))
     finals = []
     for p in sorted(glob.glob(os.path.join(out_root, "final_*.mp4"))):
         rel = os.path.relpath(p, out_root)
@@ -1216,11 +1262,10 @@ def outputs_listing(mgr):
         segs = []
         tdir = os.path.join(cdir, tag)
         for p in sorted(glob.glob(os.path.join(tdir, "seg_*.mp4"))):
-            segs.append({"rel": os.path.relpath(p, out_root).replace("\\", "/"),
-                         "name": os.path.basename(p), "size": os.path.getsize(p)})
+            segs.append(_entry(p, out_root))
         chains.append({"tag": tag, "segs": segs[-40:]})
     chains.sort(key=lambda x: x["tag"])
-    return {"finals": finals, "chains": chains}
+    return {"finals": finals, "singles": singles, "chains": chains, "slots": slots}
 
 
 # --------------------------------------------------------------------------
@@ -1231,7 +1276,7 @@ HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ChainDirector V2 · Web</title>
+<title>ChainDirector V3 · Web</title>
 <style>
 :root{--bg:#0f1115;--panel:#171b22;--line:#2a3140;--fg:#e6e9f0;--dim:#8b93a3;
 --acc:#4da3ff;--ok:#35c96a;--warn:#f0b23c;--bad:#f05a5a;--mono:ui-monospace,Consolas,monospace}
@@ -1303,6 +1348,7 @@ footer{padding:8px 16px;color:var(--dim);font-size:11px}
 .linkdel{color:var(--bad);cursor:pointer}
 .tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 .otblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.grp td{padding-top:10px;font-weight:600;color:var(--fg)}
 @media(max-width:640px){
   main{padding:8px;gap:8px}
   section{padding:9px}
@@ -1322,7 +1368,7 @@ footer{padding:8px 16px;color:var(--dim);font-size:11px}
 </head>
 <body>
 <header>
-  <h1>ChainDirector V2 · Web</h1>
+  <h1>ChainDirector V3 · Web</h1>
   <span class="statusline">
     <span class="pill" id="comfy">ComfyUI …</span>
     <span class="pill" id="busy">GPU: 检查中</span>
@@ -1335,6 +1381,10 @@ footer{padding:8px 16px;color:var(--dim);font-size:11px}
     <section>
       <h2>运行面板</h2>
       <div id="curpan">空闲 — 没有正在运行的任务</div>
+      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+        <button type="button" onclick="stopService()">释放显存（停 ComfyUI）</button>
+        <button type="button" onclick="clearSlots()">清空链槽位（h3_continuous）</button>
+      </div>
     </section>
 
     <section style="margin-top:12px">
@@ -1383,6 +1433,7 @@ footer{padding:8px 16px;color:var(--dim);font-size:11px}
           </div>
           <div class="chk"><input type="checkbox" id="f_merge" name="merge" checked><label style="margin:0">跑完自动 merge 成 final_&lt;tag&gt;.mp4</label></div>
           <div class="chk"><input type="checkbox" id="f_clean" name="clean_slots" checked><label style="margin:0">全新链：跑前清空 h3_continuous 槽位 + 本 tag 旧片段</label></div>
+          <div class="chk"><input type="checkbox" id="f_stopwd" name="stop_when_done"><label style="margin:0">跑完释放显存（--stop-when-done；不勾=常驻，下个任务复用不重载）</label></div>
         </details>
 
         <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
@@ -1553,9 +1604,9 @@ function fmt(t){const d=t?" "+t:"";return d;}
 
 /* ---------- submit ---------- */
 const TEXT_FIELDS=["prompt","beats","tag","segments","dur","width","height","steps","seed",
-                   "merge","clean_slots","continue_of","duplicate_of"];
+                   "merge","clean_slots","stop_when_done","continue_of","duplicate_of"];
 const FORM_FIELDS=["prompt","beats","tag","segments","dur","width","height","steps","seed",
-                   "merge","clean_slots"];
+                   "merge","clean_slots","stop_when_done"];
 const FILE_ALLOW={text:[], i2v:["first_image","last_image"]};
 
 function lockEngine(lock){engineLocked=lock;document.querySelectorAll("#enginetabs button").forEach(b=>b.disabled=lock);}
@@ -1569,10 +1620,11 @@ function fillForm(cfg){
   Object.entries(map).forEach(([k,n])=>{const el=form.querySelector('[name="'+n+'"]');if(el&&p[k]!=null)el.value=p[k];});
   if(p.seed==null)form.querySelector('[name=seed]').value="";
   $("f_merge").checked=!!p.merge;
+  $("f_stopwd").checked=!!p.stop_when_done;
   setEngine(cfg.engine==="i2v"?"i2v":"text");
 }
 function lockParams(keep){
-  ["prompt","beats","dur","width","height","steps","seed","merge","clean_slots"].forEach(n=>{
+  ["prompt","beats","dur","width","height","steps","seed","merge","clean_slots","stop_when_done"].forEach(n=>{
     const el=document.querySelector('[name="'+n+'"]'); if(el)el.disabled=!keep.includes(n);
   });
 }
@@ -1647,9 +1699,11 @@ async function refreshState(){
   const cu=st.comfy;
   $("comfy").textContent="ComfyUI: "+(cu.up?"在线":"离线");
   $("comfy").className="pill "+(cu.up?"ok":"bad");
+  const devs=st.vram||[];
+  const vr=devs.map(v=>((v.used/1073741824).toFixed(1)+"/"+(v.total/1073741824).toFixed(1)+"G")).join(" ");
+  const resident=devs.some(v=>v.used>4*1073741824);
   $("busy").textContent = st.blocking && st.blocking.length ? "GPU 忙: " + st.blocking.join("；")
-    : (st.busy_external && st.busy_external.length ? "GPU: 空闲 (旧链 worker 常驻, 下任务清场)"
-    : "GPU: 空闲");
+    : ("GPU: 空闲" + (vr ? " · " + vr : "") + (resident ? " (常驻中, 下任务复用)" : ""));
   $("busy").className = "pill " + ((st.blocking && st.blocking.length) ? "que" : "ok");
   $("now").textContent=st.server_ts;
 
@@ -1705,7 +1759,7 @@ async function refreshJobs(){
     const d=(x.duration!=null)?Math.round(x.duration/60*10)/10+"min":(x.ended?"":x.status);
     return '<tr><td class="muted">'+esc(x.created)+'</td>'+
       '<td><span class="badge '+esc(x.status)+'">'+esc(x.status)+'</span></td>'+
-      '<td>'+esc(x.tag)+'<br><span class="muted">'+esc(x.engine)+'</span></td>'+
+      '<td><a href="#" onclick="focusTag(\''+esc(x.tag)+'\');return false">'+esc(x.tag)+'</a><br><span class="muted">'+esc(x.engine)+'</span></td>'+
       '<td>'+esc(x.target_segments)+'</td><td class="muted">'+esc(d)+'</td>'+
       '<td>'+(x.final_rel?'<a href="/files/'+x.final_rel+'?dl=1" download>下载</a> ':'' )+
         (x.status==="done"?'<a href="#" onclick="openModal(this,\'/files/'+esc(x.final_rel||"")+'\',\''+esc(x.tag)+'\');return false">预览</a> ':'' )+
@@ -1723,15 +1777,21 @@ async function refreshOutputs(){
   let j;
   try{j=await jget("/api/outputs");}catch(_){return;}
   let h='';
+  const row=(rel,name,ts,size,title)=>'<tr><td><a href="#" onclick="openModal(this,\'/files/'+esc(rel)+'\',\''+esc(title||name)+'\');return false">'+esc(name)+'</a></td>'+
+      '<td class="muted">'+(size/1048576).toFixed(1)+'MB</td><td class="muted">'+esc(ts)+'</td>'+
+      '<td><a href="#" class="linkdel" onclick="delFile(\''+encodeURIComponent(rel)+'\');return false">删</a></td></tr>';
+  let rows='';
   if(j.finals.length){
-    h+='<div style="margin-bottom:6px"><b>final 成片</b></div><div class="otblwrap"><table><tbody>';
-    j.finals.forEach(f=>{
-      h+='<tr><td><a href="#" onclick="openModal(this,\'/files/'+esc(f.rel)+'\',\''+esc(f.tag)+'\');return false">'+esc(f.name)+'</a></td>'+
-        '<td class="muted">'+(f.size/1048576).toFixed(1)+'MB</td><td class="muted">'+esc(f.ts)+'</td>'+
-        '<td><a href="#" class="linkdel" onclick="delFile(\''+encodeURIComponent(f.rel)+'\');return false">删</a></td></tr>';
-    });
-    h+='</tbody></table></div>';
+    rows+='<tr class="grp"><td colspan="4">final 成片</td></tr>'+j.finals.map(f=>row(f.rel,f.name,f.ts,f.size,f.tag)).join("");
   }
+  if((j.singles||[]).length){
+    rows+='<tr class="grp"><td colspan="4">单任务输出 <span class="muted">（浏览器 / API 直连提交）</span></td></tr>'+
+          j.singles.map(f=>row(f.rel,f.name,f.ts,f.size,f.name)).join("");
+  }
+  if(rows)h+='<div class="otblwrap"><table><tbody>'+rows+'</tbody></table></div>';
+  h+='<div style="margin:10px 0 4px"><b>链槽位</b> <span class="muted">'+
+     ((j.slots||[]).length ? j.slots.length+' 个（续拍依据；最新 '+esc(j.slots[j.slots.length-1].ts)+'）'
+                           : '0 个（下一条链将从第 1 段开始）')+'</span></div>';
   if(j.chains.length){
     h+='<div style="margin:8px 0 4px"><b>片段库（每段 raw）</b></div>';
     j.chains.forEach(c=>{
@@ -1740,14 +1800,33 @@ async function refreshOutputs(){
         '<button style="padding:1px 6px;font-size:11px" onclick="toggleSegs(\''+boxid+'\')">展开</button><br>'+
         '<div id="'+boxid+'" style="display:none">'+c.segs.map(s=>
           '<a href="#" onclick="openModal(this,\'/files/'+esc(s.rel)+'\',\''+esc(s.name)+'\');return false">'+esc(s.name)+'</a> '+
-          '<span class="muted">'+(s.size/1048576).toFixed(1)+'MB</span> '+
+          '<span class="muted">'+(s.size/1048576).toFixed(1)+'MB · '+esc(s.ts)+'</span> '+
           '<a href="#" class="linkdel" style="font-size:11px" onclick="delFile(\''+encodeURIComponent(s.rel)+'\');return false">删</a><br>').join("")+'</div></div>';
     });
   }
-  if(!j.finals.length&&!j.chains.length)h='<span class="muted">尚无产物</span>';
+  if(!rows&&!j.chains.length)h+='<span class="muted">尚无产物</span>';
   $("outbox").innerHTML=h;
 }
 function toggleSegs(id){const el=$(id);el.style.display=el.style.display==="none"?"block":"none";}
+function focusTag(tag){
+  document.querySelectorAll('[id^="seglist_"]').forEach(el=>el.style.display="none");
+  const el=$("seglist_"+tag);
+  if(!el){alert("tag "+tag+" 暂无片段");return;}
+  el.style.display="block";
+  el.scrollIntoView({behavior:"smooth",block:"center"});
+}
+async function stopService(){
+  if(!confirm("停止 ComfyUI 并释放显存？\n常驻的 FSDP 分片会被释放，下个任务需重新装载（~2-4 分钟）"))return;
+  const r=await fetch("/api/service/stop",{method:"POST"});
+  const j=await r.json().catch(()=>({}));
+  alert(j.msg||("HTTP "+r.status));refreshAll();
+}
+async function clearSlots(){
+  if(!confirm("清空 output/h3_continuous/chain_*.safetensors？\n链将从第 1 段重新开始，无法续拍"))return;
+  const r=await fetch("/api/slots/clear",{method:"POST"});
+  const j=await r.json().catch(()=>({}));
+  alert(j.msg||("HTTP "+r.status));refreshOutputs();
+}
 
 /* ---------- actions ---------- */
 function startContinue(id){
@@ -1978,7 +2057,7 @@ def main():
 
     signal.signal(signal.SIGTERM, _sigterm)
     signal.signal(signal.SIGINT, _sigterm)
-    print("ChainDirector V2 Web on http://%s:%d/ (driver=%s)" % (a.host, a.port, driver))
+    print("ChainDirector V3 Web on http://%s:%d/ (driver=%s)" % (a.host, a.port, driver))
     print("ComfyUI:", a.comfy_base, "| data:", data)
     try:
         srv.serve_forever(poll_interval=0.5)
