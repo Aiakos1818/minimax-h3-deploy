@@ -111,7 +111,7 @@ Herrgotts masked-AV 把上一段 **audio latent 尾部数字拷贝**进新段 he
 
 ### D3. 关键纠偏：高频 ≠ 伪影
 
-- 官方 `video_minimax_h3_raylight_t2v.json` 产物：
+- 官方 `video_minimax_h3_raylight_t2v.json` 产物（该文件现名 `video_minimax_h3_raylight_fl2v.json`）：
   - **00001**（天台弱场景，20 步）：音频近静音，rms≈0.0005（≈ **−66dB**），几乎无内容；
   - **00002**（杯子碎裂："…3秒时掉到地板上，听到清脆的碎裂声"，8 步）：rms≈0.10，
     8–15k≈10–17、**12k±200 峰值 39.3、peak 12000Hz**——高 12k 大量存在，但**听感完全正常**

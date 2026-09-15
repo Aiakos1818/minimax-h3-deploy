@@ -151,7 +151,7 @@ SM75 Sage fork 编译要点（`setup.py` 三处本地改动）：
 
 ### 2.6 worker 显存策略（B：clear_vram_after_sampling=True，已固化为默认）
 
-- workflow 文件：`scripts/workflows/api_raylight_h3_i2v.json` 中
+- workflow 文件：`workflows/api/api_raylight_h3_i2v.json` 中
   `RayInitializer.clear_vram_after_sampling=True`。
 - 效果：每个任务结束 worker 释放分片 → 下一次**换 prompt/图**的任务自动重载（~90s），
   不会因编码器 dispatch 而 CUDA OOM。
@@ -300,13 +300,14 @@ dispatch，见 chain_director_v1.md）与 **v2 persist**（同任务段间 FSDP 
   （`MiniMaxH3ImageToVideo`/`MiniMaxH3ReferenceToVideo`）差异全在 conditioning 层
   （`minimax_keyframes` vs `minimax_refs`）。**保留两权重不互删**（未经 ref2va 顶替 fl2va
   的 i2v/t2v 等质对照，不冒险删）。
-- REF2VA 冒烟已通过：`scripts/workflows/api_raylight_h3_ref2v.json`（API 图；RayUNETLoader
+- REF2VA 冒烟已通过：`workflows/api/api_raylight_h3_ref2v.json`（API 图；RayUNETLoader
   指 ref2va；`MiniMaxH3ReferenceToVideo` 传 `ref_images.ref_image_0:[LoadImage,0]`；
   480p/124帧/8步）→ `output/video/MiniMax_H3_00021_.mp4`，e2e 275s，worker 回落 620M。
   参考口最多 9 图 `<Picture N>`（`ref_image_0..8`），另有 ref_videos/ref_audios
   （Audio 需 audio_vae）。
-- **前端 r2v 工作流**：`scripts/workflows/video_minimax_h3_raylight_ref2v.json` +
-  `ComfyUI/user/default/workflows/` 同文件（浏览器 F5 → Workflow 列表双击
+- **前端 r2v 工作流**：`workflows/video_minimax_h3_raylight_ref2v.json`
+  （ComfyUI 的 user/default/workflows 已软链到运行目录的 `workflows/`，浏览器里就是同一份；
+  F5 → Workflow 列表双击
   `MiniMax H3 REF2VA`）。基于 raylight 官方示例精简：3 个 LoadImage（默认连好
   `input/example.png`→`ref_image_0`，另两个留空随传随连）、外部提示词框
   （`<Picture N>` 引用）、`ResolutionSelector`（0.4MP=864×480）、`PrimitiveFloat` 秒数
@@ -319,28 +320,27 @@ dispatch，见 chain_director_v1.md）与 **v2 persist**（同任务段间 FSDP 
 ## 五、目录速查
 
 ```
-~/MiniMax-H3-Deploy/
-├── ComfyUI/custom_nodes/{raylight, comfyui_h3_multigpu_clip}
-├── vendor/SageAttention2_Optimized_Test/   # SM75 sage 源码（编译产物 dist/*.whl）
-├── scripts/gen_dual.py                     # 双卡 CLI
-├── scripts/workflows/api_raylight_h3_i2v.json   # 双卡图生模板（API 提交，clear=True 已固化）
-├── scripts/workflows/api_raylight_h3_t2v.json   # 双卡文生模板（API 提交；纯文生，无图分支）
-├── scripts/workflows/video_minimax_h3_raylight_t2v.json  # 双卡文生·前端版
-├── ComfyUI/user/default/workflows/video_minimax_h3_raylight_t2v.json  # 同上前端版
-├── scripts/workflows/api_raylight_h3_ref2v.json          # 双卡 r2v/参考生模板（API 提交）
-├── scripts/workflows/video_minimax_h3_raylight_ref2v.json  # 双卡 r2v·前端版
-├── ComfyUI/user/default/workflows/video_minimax_h3_raylight_ref2v.json  # 同上前端版
+~/MiniMax-H3-Deploy/        # 运行目录 = git 仓库（origin: Aiakos1818/minimax-h3-deploy）
+├── workflows/              # 浏览器用前端工作流（ComfyUI user/default/workflows 软链指向这里）
+│   ├── api/                # API 模板（gen*.py 用；浏览器默认不列出）
+│   └── video_minimax_h3_raylight_fl2v.json / _ref2v.json / video_minimax_h3_i2v.json / video_minimax_h3_t2v.json
+├── nodes/                  # ← ComfyUI custom_nodes/{comfyui_h3_multigpu_clip,h3_vae_unload} 软链指向这里
+├── scripts/gen_dual.py                             # 双卡 CLI
 ├── scripts/start-comfyui-for-minimax-h3.sh / stop.sh
+├── vendor/SageAttention2_Optimized_Test/           # SM75 sage 源码（编译产物 dist/*.whl）
 └── output/video/
 ```
 
+> ComfyUI 引擎在 `~/ComfyUI-Deploy`，与运行目录分离；`custom_nodes/*` 与
+> `user/default/workflows` 通过软链共享运行目录里的同一份节点/工作流。
+
 ### 双卡文生视频（前端 / API 用法）
-- 前端：浏览器打开 ComfyUI → Workflow 列表选 `video_minimax_h3_raylight_t2v`
+- 前端：浏览器打开 ComfyUI → Workflow 列表选 `video_minimax_h3_raylight_fl2v`
   （若列表不刷新则按 F5）。默认即文生：改 prompt/seed/分辨率（ResolutionSelector）/帧数
   （MiniMaxH3ImageToVideo 的 length，124≈5.2s）后 Run。
 - 图生：给画布里的 `LoadImage` 上传图，把它的 IMAGE 输出连到 `MiniMaxH3ImageToVideo`
   的 first_frame 端口（默认不连=文生）。
-- API（脚本/curl）：用 `scripts/workflows/api_raylight_h3_t2v.json` 提交即可（示例替换
+- API（脚本/curl）：用 `workflows/api/api_raylight_h3_t2v.json` 提交即可（示例替换
   prompt/seed 后 `POST /prompt`）。也可 `gen_dual.py --prompt "..."`（不带 --image 即文生）。
 - 注意：`api_*.json` 是 API 格式，前端双击不会渲染；要可视化必须加载
   `video_minimax_*.json` 前端版。

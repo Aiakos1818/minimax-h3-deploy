@@ -8,7 +8,7 @@ import urllib.request
 
 HOME = os.path.expanduser("~/MiniMax-H3-Deploy")
 API = "http://127.0.0.1:8188"
-WF = HOME + "/scripts/workflows/api_raylight_h3_i2v.json"
+WF = HOME + "/workflows/api/api_raylight_h3_i2v.json"
 
 
 def http_json(url, data=None):

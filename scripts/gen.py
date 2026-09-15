@@ -2,7 +2,7 @@ import argparse, json, os, random, sys, time, urllib.request
 
 HOME = os.path.expanduser("~/MiniMax-H3-Deploy")
 API = "http://127.0.0.1:8188"
-WF_DIR = HOME + "/scripts/workflows"
+WF_DIR = HOME + "/workflows/api"
 T2V_WF = WF_DIR + "/api_local_t2v.json"
 I2V_WF = WF_DIR + "/api_local_i2v.json"
 
