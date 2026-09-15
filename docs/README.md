@@ -1,7 +1,7 @@
 # MiniMax-H3 Deploy 文档索引
 
 MiniMax-H3 双 RTX 2080 Ti 22G（NVLink）raylight TP 部署的工作节点文档。
-远端运行目录 `~/MiniMax-H3-Deploy/`，脚本在 `scripts/`，文档与运行目录同步于 `docs/`。
+运行目录即本仓库 `~/MiniMax-H3-Deploy/`（脚本在 `scripts/`，文档在 `docs/`）——单目录，无同步。
 
 ## 工作节点演进（开发顺序）
 
@@ -10,13 +10,15 @@ MiniMax-H3 双 RTX 2080 Ti 22G（NVLink）raylight TP 部署的工作节点文�
 | 1 | [gen.md](gen.md) | `gen.py` | 单机/单卡，官方 `MiniMaxH3ImageToVideo` workflow（`api_local_*.json`）驱动，无续接 | 历史（workflow 模板已清理） |
 | 2 | [gen_dual.md](gen_dual.md) | `gen_dual.py` | 双卡 raylight FSDP/Ulysses 单任务（含部署/版本锁/性能/CLIP offload 归档） | 历史（能力移交 v1/v2） |
 | 3 | [chain_director_v1.md](chain_director_v1.md) | `chain_director_v1.py` | Herrgotts masked-AV 多段续接链 v1（逐段 queue，每段重载） | 自 2026-09-05 不再维护 |
-| 4 | [chain_director_v2.md](chain_director_v2.md) | `chain_director_v2.py` | persist 模式链（FSDP 段间驻留）+ 首段素材分流（文/图锚/参考图视频音频），**现行主线** | 维护中 |
-| 5 | [chain_director_v2.md](chain_director_v2.md) | `chain_director_v2_web.py` | 局域网 Web 控制台（`:8189`，stdlib-only）：参数镜像 + 上传 + 串行队列 + 续拍 + 在线预览；经 GPU 宿主 `scripts/` 常驻（`--daemon/--stop/--status`） | 现行 |
+| 4 | [chain_director_v2.md](chain_director_v2.md) | `chain_director_v2.py` | persist 模式链（FSDP 段间驻留）+ 首段素材分流（ref2va 参考图/视频/音频） | 维护中（ref2va 走这里） |
+| 5 | [chain_director_v2.md](chain_director_v2.md) | `chain_director_v2_web.py` | 局域网 Web 控制台（`:8189`，stdlib-only）：参数镜像 + 上传 + 串行队列 + 续拍 + 在线预览 | 现行（v2/ref2va） |
+| 6 | [chain_director_v3.md](chain_director_v3.md) | `chain_director_v3.py` | 常驻 UNet 链：段间零 FSDP 重载、服务默认常驻、int4 CLIP 按需上下卡、首段 fl2va | **现行主线** |
+| 7 | [chain_director_v3.md](chain_director_v3.md) | `chain_director_v3_web.py` | 局域网 Web 控制台（`:8190`，独立数据目录 `.h3web_v3/`），驱动 v3 | 现行 |
 | — | [audio.md](audio.md) | —（横切所有阶段） | H3 音频专项：表示与通路、段间 audio 连接、`--ref-audio`/`cond_audio` 引导、**首段底噪现象调查**（steps 收敛结论） | 现行 |
 
 ## 快速入口
 
-- **当前推荐做法**：`chain_director_v2.py`，见 [chain_director_v2.md](chain_director_v2.md)。
+- **当前推荐做法**：`chain_director_v3.py`（常驻 UNet 链），见 [chain_director_v3.md](chain_director_v3.md)；需要 ref2va 参考素材时用 `chain_director_v2.py`。
 - **音频踩坑/底噪结论**：见 [audio.md](audio.md)（立体声 2ch/32kHz、8 步弱场景易出噪声态、弱音频 prompt 用 `--steps 20`）。
 - **双卡部署版本锁与踩坑**（ComfyUI `30bdda1`、xfuser 0.4.5、NCCL cu13、SM75 Sage 编译法、内存三律）：并入 [gen_dual.md](gen_dual.md)。
 
@@ -30,19 +32,22 @@ MiniMax-H3 双 RTX 2080 Ti 22G（NVLink）raylight TP 部署的工作节点文�
 
 ## 目录约定
 
+运行目录 `~/MiniMax-H3-Deploy/` 就是本仓库；ComfyUI 引擎在 `~/ComfyUI-Deploy`，两者通过软链共享节点与工作流。
+
 ```
-~/MiniMax-H3-Deploy/
-├── ComfyUI/                     # ComfyUI master 主仓库（git clean）
-│   └── custom_nodes/
-│       ├── raylight/            # 双卡框架（被改：nodes.py/ray_worker.py/xdit_context_parallel.py）
-│       ├── comfyui_h3_multigpu_clip/   # 多卡 Qwen CLIP（被改：cond 缓存）
-│       ├── Herrgotts-H3-Infinite-Continuation-Suite/  # masked-AV 续接（未改）
-│       └── ComfyUI-H3-Motion-Context/  # 对照用（未改）
+~/MiniMax-H3-Deploy/            # 运行目录 = git 工作树（origin: Aiakos1818/minimax-h3-deploy）
+├── nodes/                      # ← ComfyUI custom_nodes/{comfyui_h3_multigpu_clip,h3_vae_unload} 软链指向这里
+├── workflows/                  # ← ComfyUI user/default/workflows 软链指向这里（浏览器工作流列表）
+│   └── api/                    # API 模板（gen*.py 用，浏览器默认不列出）
+├── scripts/                    # 各阶段 CLI + web 控制台 + start-comfyui-for-minimax-h3.sh
+├── docs/                       # 本文档集
 ├── vendor/SageAttention2_Optimized_Test/   # SM75 Sage 源码（编译产物 dist/*.whl）
-├── cond_cache/                  # CLIP cond 磁盘缓存（可 rm -rf）
-├── output/                      # 产物：video/chain/<tag>/、h3_continuous/chain_*.safetensors、final_<tag>.mp4
-├── scripts/                     # 各阶段 CLI + start-comfyui-for-minimax-h3.sh/stop.sh + workflows/
-├── docs/                        # 本文档集
-├── comfyenv/                    # ComfyUI venv
-└── DUAL_TP_NOTES.md 等旧文档    # 内容已并入 docs/（归档见本地 docs/_archive_20260905/）
+├── cond_cache/                 # CLIP cond 磁盘缓存（可 rm -rf）
+├── output/                     # 产物：video/chain/<tag>/、h3_continuous/chain_*.safetensors、final_<tag>.mp4
+├── .h3web/ .h3web_v3/          # 两个 web 控制台的数据目录
+└── comfyenv 在 ComfyUI 侧       # ~/ComfyUI-Deploy/comfyenv
+
+~/ComfyUI-Deploy/               # ComfyUI 引擎（独立仓库，分支 h3-sm75-deploy）
+├── custom_nodes/               # raylight / Herrgotts / Motion-Context（真实目录）；自研两节点为软链
+└── user/default/workflows ->   # 软链到 ~/MiniMax-H3-Deploy/workflows
 ```

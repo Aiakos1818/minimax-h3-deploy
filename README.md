@@ -136,14 +136,26 @@ cat start.sh
 
 ## 本仓库内容
 
+本目录**既是运行目录也是 git 工作树**（origin `Aiakos1818/minimax-h3-deploy`）：产物、缓存、web 数据都落在这里但已被 `.gitignore` 排除。改动直接在本目录进行，不需要往别处复制同步。
+
 ```
-nodes/comfyui_h3_multigpu_clip/   # 多卡 Qwen3-VL-32B CLIP：按层拆卡 + 磁盘 cond 缓存 + 显存优化
-nodes/h3_vae_unload/              # UnloadVideoVAE：VAE 三处腾挪 + 清 ray worker CUDA 池
-workflows/                        # 已验证工作流 + 历史 API/UI 工作流
-scripts/                          # chain_director_v3（续接链：UNET 常驻 + CLIP 按需上卡）/ v2（persist 对照）、web 控制台 v3_web(:8190，驱动 v3) / v2_web(:8189)、gen/gen_dual
+nodes/                            # ← ComfyUI custom_nodes/{comfyui_h3_multigpu_clip,h3_vae_unload} 软链指向这里
+workflows/                        # ← ComfyUI user/default/workflows 软链指向这里（= 浏览器的工作流列表）
+workflows/api/                    # API 格式模板（gen.py/gen_dual.py 用；浏览器默认不列出）
+scripts/                          # chain_director_v3（续接链：UNET 常驻 + CLIP 按需上卡）/ v2（persist 对照）、web 控制台 v3_web(:8190) / v2_web(:8189)、gen/gen_dual
 docs/                             # 部署与踩坑文档（audio / chain_director_v1-v3 / gen_dual / gen）
-start.sh stop.sh                  # 双卡启动脚本
+start.sh stop.sh                  # 双卡启动脚本（与 ~/ComfyUI-Deploy 的同名文件保持一致）
 ```
+
+ComfyUI 引擎在另一个仓库 `~/ComfyUI-Deploy`，与本目录通过软链共享节点和工作流：
+
+```
+~/ComfyUI-Deploy/custom_nodes/comfyui_h3_multigpu_clip -> ~/MiniMax-H3-Deploy/nodes/comfyui_h3_multigpu_clip
+~/ComfyUI-Deploy/custom_nodes/h3_vae_unload            -> ~/MiniMax-H3-Deploy/nodes/h3_vae_unload
+~/ComfyUI-Deploy/user/default/workflows                -> ~/MiniMax-H3-Deploy/workflows
+```
+
+改节点/工作流就在本目录改（浏览器里保存的工作流也落在这里），无需任何同步步骤。
 
 ### `h3_vae_unload` 为什么必要
 
