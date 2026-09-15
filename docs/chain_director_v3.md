@@ -109,6 +109,31 @@ cd ~/MiniMax-H3-Deploy
 - `--stop-when-done`：跑完 stop（默认常驻不 stop，见一·B）。
 - 产物：`output/video/chain/<tag>/seg_<i>_*.mp4`、slot `output/h3_continuous/chain_*.safetensors`、合并 `output/final_<tag>.mp4`（按 handover 元数据裁掉每段不可用尾/保护头，pts 单调）。
 
+## 四·B、Web 控制台（`chain_director_v3_web.py`）
+
+**新文件**，不动 `chain_director_v2_web.py`（后者继续驱动 v2 / 提供 ref2va）。两者可并用：
+
+| | chain_director_v2_web.py（原样） | chain_director_v3_web.py（新） |
+|---|---|---|
+| 驱动 | chain_director_v2.py | **chain_director_v3.py** |
+| 默认端口 | 8189 | **8190** |
+| 数据目录 | `~/MiniMax-H3-Deploy/.h3web` | `~/MiniMax-H3-Deploy/.h3web_v3` |
+| pid / 日志 | `h3web.pid` / `h3web.log` | `h3web_v3.pid` / `h3web_v3.log` |
+| 引擎 | text / i2v / ref（ref2va 素材） | **text / i2v**（fl2va only） |
+
+```bash
+~/ComfyUI-Deploy/comfyenv/bin/python scripts/chain_director_v3_web.py --daemon   # 0.0.0.0:8190
+~/ComfyUI-Deploy/comfyenv/bin/python scripts/chain_director_v3_web.py --status
+~/ComfyUI-Deploy/comfyenv/bin/python scripts/chain_director_v3_web.py --stop
+```
+
+- `_build_argv` 只发 v3 认识的参数（`--tag/--prompt/--segments/--dur/--width/--height/--steps/--beat/--seed/--merge/--first-image/--last-image`）。
+- ref2va 素材上传或 `engine=ref` 会被后端直接 400 拒绝，提示改用 CLI 跑 `chain_director_v2.py --ref-image/-video/-audio`。
+- 表单移除了 ref2va 素材区、ref-image-size 与「清场方式 clear」（v3 无这些参数）；服务生命周期由 driver 自己管（默认常驻）。
+- busy guard 恒开：ComfyUI `/queue` 有任务在跑，或"服务离线且外部 driver 存活（可能在重启）"时排队等待；跨控制台也生效（判据是 `/queue`，不是 pidfile）。
+- `clean_slots`（默认开）仍在跑前清 `h3_continuous` 槽位 + 本 tag 旧片段 + 旧 final（等价且比 `--clean` 更彻底）。
+- 取消 = TERM 级：v3 收到后 stop 服务 + 清状态文件，不留半坏常驻态。
+
 ## 五、实测（2×2080Ti，864×480，8 步，int4 CLIP + int8 UNet）
 
 | 轮次 | 场景 | 段 1 | 段 2 | 合并 | 备注 |

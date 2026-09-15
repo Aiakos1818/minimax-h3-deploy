@@ -140,7 +140,7 @@ cat start.sh
 nodes/comfyui_h3_multigpu_clip/   # 多卡 Qwen3-VL-32B CLIP：按层拆卡 + 磁盘 cond 缓存 + 显存优化
 nodes/h3_vae_unload/              # UnloadVideoVAE：VAE 三处腾挪 + 清 ray worker CUDA 池
 workflows/                        # 已验证工作流 + 历史 API/UI 工作流
-scripts/                          # chain_director_v3（续接链：UNET 常驻 + CLIP 按需上卡）/ v2（persist 对照）、web 控制台(:8189)、gen/gen_dual
+scripts/                          # chain_director_v3（续接链：UNET 常驻 + CLIP 按需上卡）/ v2（persist 对照）、web 控制台 v3_web(:8190，驱动 v3) / v2_web(:8189)、gen/gen_dual
 docs/                             # 部署与踩坑文档（audio / chain_director_v1-v3 / gen_dual / gen）
 start.sh stop.sh                  # 双卡启动脚本
 ```
@@ -167,7 +167,9 @@ CLIP+UNET 常驻后每卡只剩 ~3.2GB，而视频 VAE 编/解码需要 ~2.4GB �
 
 **默认常驻**：跑完不 `stop.sh`，服务 + ray worker + 已装载 FSDP 原样留给下一轮（`--stop-when-done` 则跑完释放；失败/取消一律 stop）。复用判定看进程 pid + 状态文件 `~/MiniMax-H3-Deploy/.v3_service.json`，命中就连 `reuse_epoch` 一起沿用，不重启、不重建、不重载；空闲时每卡仍占 ~11.9G，手动 `stop.sh` 可立刻释放。
 
-实测（864×480 / 8 步）：冷启动段 1 242.8s → **复用后段 1 95.4s（2.5×）**，段 2 **135.2s**（无 OOM、零上卡）；单段帧数上限约 **226 帧**（CLIP 也常驻的旧档只有 ~107，段 2 必 OOM）。`--dur` 用 "Net New Content" 语义，续段总长 = 净新内容 + 39 帧保护上下文。细节、边界与踩坑见 [`docs/chain_director_v3.md`](docs/chain_director_v3.md)。
+实测（864×480 / 8 步）：冷启动段 1 242.8s → **复用后段 1 95.4s（2.5×）**，段 2 **135.2s**（无 OOM、零上卡）；单段帧数上限约 **226 帧**（CLIP 也常驻的旧档只有 ~107，段 2 必 OOM）。`--dur` 用 "Net New Content" 语义，续段总长 = 净新内容 + 39 帧保护上下文。
+
+Web 控制台：`scripts/chain_director_v3_web.py --daemon`（默认 :8190、独立数据目录 `.h3web_v3/`；原有 `chain_director_v2_web.py` 保持原样驱动 v2/ref2va，两者可并用）。细节、边界与踩坑见 [`docs/chain_director_v3.md`](docs/chain_director_v3.md)。
 
 ## 实测（864x480 / 20 步 / 模型常驻）
 

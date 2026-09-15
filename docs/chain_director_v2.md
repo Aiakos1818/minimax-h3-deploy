@@ -213,6 +213,8 @@ resident 续段采样 → 脚本在 clip2 前**自动 restart 一次**（~16s）
   正常持久态、不算忙，下个任务才清场）；排队任务可直接移除。数据目录
   `~/.h3web/jobs/<job_id>/`。docstring 内为完整 API/护栏说明；离线回归测试在本地
   `scripts` 同级 `.webtest/run_webtest.py`（mock driver，无 GPU）。
+  > 驱动的 v3 续接链有独立控制台 **`chain_director_v3_web.py`**（默认 :8190、独立数据目录
+  > `.h3web_v3/`，两者可同时运行），见 `chain_director_v3.md` 四·B；本控制台继续用于 v2 / ref2va。
 - **chain_director_v1.py**（对照/冷跑）：clear=True 逐段（每段重载），语义与旧版一致。
 - **poc_samegraph.py**（POC）：同图单 queue N 段（借助 cond 缓存，见 v1 文档八节）。
 - **start-comfyui-for-minimax-h3.sh**（`scripts/`）/ **stop.sh**（`~/ComfyUI-Deploy/`）：ComfyUI 服务启动（含 RAY env）/停止。
