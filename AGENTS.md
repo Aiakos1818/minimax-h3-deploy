@@ -7,6 +7,8 @@ ComfyUI 引擎在 `~/ComfyUI-Deploy`，通过软链共享本目录的节点与�
 
 - `~/ComfyUI-Deploy/custom_nodes/{comfyui_h3_multigpu_clip,h3_vae_unload}` → `nodes/*`
 - `~/ComfyUI-Deploy/user/default/workflows` → `workflows/`（浏览器里看到的即这一份）
+- `~/.config/opencode/skill/minimax-h3-long-video` → `skills/minimax-h3-long-video`（长视频 skill：
+  大纲→分镜→锚图→逐段生成→拼成片；**只在本目录这份上改**，全局那个是软链）
 
 节点 / 工作流 / 脚本 / 文档都在本目录直接改，**不需要往别处复制同步**。
 产物与缓存（`output/ cond_cache/ downloads/ vendor/ downloadenv/ raylightenv/ .h3web/ .h3web_v3/ .clip_offload_test/ *.log *.bak_*`）已被 `.gitignore` 排除。
