@@ -140,8 +140,8 @@ cat start.sh
 nodes/comfyui_h3_multigpu_clip/   # 多卡 Qwen3-VL-32B CLIP：按层拆卡 + 磁盘 cond 缓存 + 显存优化
 nodes/h3_vae_unload/              # UnloadVideoVAE：VAE 三处腾挪 + 清 ray worker CUDA 池
 workflows/                        # 已验证工作流 + 历史 API/UI 工作流
-scripts/                          # chain_director_v2（persist 续接链）、web 控制台(:8189)、gen/gen_dual
-docs/                             # 部署与踩坑文档（audio / chain_director / gen_dual / gen）
+scripts/                          # chain_director_v3（续接链：UNET 常驻 + CLIP 按需上卡）/ v2（persist 对照）、web 控制台(:8189)、gen/gen_dual
+docs/                             # 部署与踩坑文档（audio / chain_director_v1-v3 / gen_dual / gen）
 start.sh stop.sh                  # 双卡启动脚本
 ```
 
@@ -154,6 +154,18 @@ CLIP+UNET 常驻后每卡只剩 ~3.2GB，而视频 VAE 编/解码需要 ~2.4GB �
 3. **解码后**：踢掉 VAE + **清 ray worker 的 CUDA 缓存池**（`free_cached_vae` RPC，只 `empty_cache`，不释放模型）
 
 第 3 条是 124 帧 i2v 能否跑通的关键：ray worker 的 `cudaMallocAsync` 池会保留采样期瞬时缓冲（124 帧约 3.9GB/卡），主进程用不上，导致下一轮条件阶段差几十 MB OOM。
+
+## 多段续接链（chain_director_v3）
+
+`scripts/chain_director_v3.py` 在常驻底座上做连续多段（Herrgotts masked-AV 续接）：UNet 的 FSDP 分片全程驻留、段间不重载；int4 CLIP 只在条件缓存未命中时上卡——固定 prompt 的链**一次 encode，之后每段零上卡**（缓存跨段、跨进程有效）。首段支持文本或首/末帧锚图（走视频 VAE 关键帧，不需要 Qwen 视觉塔）。
+
+```bash
+~/ComfyUI-Deploy/comfyenv/bin/python scripts/chain_director_v3.py --tag film --segments 4 \
+  --dur 4 --width 864 --height 480 --steps 8 --clean --merge --prompt "..."
+# 产物 output/final_film.mp4（按 handover 元数据自动裁掉每段的不可用尾/保护头）
+```
+
+实测（864×480 / 8 步）：段 1 冷启动 219.5s、段 2 **135.2s**（无 OOM、零上卡）；单段帧数上限约 **226 帧**（CLIP 也常驻的旧档只有 ~107，段 2 必 OOM）。`--dur` 用 "Net New Content" 语义，续段总长 = 净新内容 + 39 帧保护上下文。细节、边界与踩坑见 [`docs/chain_director_v3.md`](docs/chain_director_v3.md)。
 
 ## 实测（864x480 / 20 步 / 模型常驻）
 
