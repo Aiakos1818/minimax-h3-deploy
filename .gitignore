@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.bak_*
+*.rlprof_bak
+cond_cache/
+output/
+downloads/
+downloadenv/
+raylightenv/
+vendor/
+.h3web/
+*.log
