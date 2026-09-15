@@ -30,15 +30,19 @@ first/last-frame anchors. Those anchors become VAE keyframes and never touch the
 Qwen vision tower, so H3_MP_KEEP_VISUAL_CPU=1 keeps that ~1.1 GiB off GPU0.
 Continuation segments are always H3ContinuousContinueV14 on the fl2va unet.
 
-Managed ComfyUI lifecycle: same as v2. Before the first real segment the service
-is taken over (stop, start, wait for :8188) and it is stopped again on exit --
-success, failure/SystemExit, or SIGTERM/SIGINT. --clear is accepted and ignored;
-the service is always restarted per run. --clean wipes the global chain slots so a
-new chain does not resume a previous tag's segments.
+ComfyUI lifecycle is resident by default: a successful run leaves the service up
+on purpose, so the next run reuses the same workers and the still-loaded FSDP
+UNet (no restart, no reload) -- the expensive cold start is paid once per service
+instance, not once per run. Reuse is only taken when the state file records the
+running service pid and the same UNet; anything else (service down, someone else's
+pid, changed unet) falls back to stop+start. --stop-when-done stops the service
+after a successful run instead; failures and SIGTERM/SIGINT always stop it so a
+broken resident state is never inherited. --clean wipes the global chain slots so
+a new chain does not resume a previous tag's segments.
 
 Usage:
   ~/ComfyUI-Deploy/comfyenv/bin/python scripts/chain_director_v3.py --tag myfilm \
-    --segments 6 --dur 5 --prompt "..." --beat "10s:..." --merge
+    --segments 6 --dur 5 --prompt "..." --merge
 """
 import argparse, glob, json, os, random, re, shutil, signal, subprocess, sys, time, urllib.request
 
@@ -70,9 +74,12 @@ LOAD_CLS = "H3ContinuousLoadLatent"
 
 _OBJ = {}
 
-# One tag for the whole run: every segment queues the same RayInitializer, so the
-# persist guard reuses the resident workers/FSDP instead of rebuilding ray.
-_RUN_EPOCH = int(time.time_ns())
+# Bookkeeping for the resident service: which service process owns the raylight
+# workers currently holding an FSDP UNet, and the reuse_epoch they were spawned
+# with. Every segment of a run queues that same epoch, so the persist guard reuses
+# the workers instead of rebuilding ray; reusing the service across runs keeps the
+# same epoch and therefore also skips the FSDP reload.
+STATE_PATH = HOME + "/.v3_service.json"
 
 
 def obj(name):
@@ -118,7 +125,7 @@ def _stage_image(src, tag, idx):
     return name
 
 
-def ray_initializer_node(epoch=_RUN_EPOCH):
+def ray_initializer_node(epoch):
     return {"class_type": "RayInitializer", "inputs": {
         "ray_cluster_address": "local", "ray_cluster_namespace": "default",
         "GPU": 2, "ulysses_degree": 2, "ring_degree": 1, "cfg_degree": 1,
@@ -128,7 +135,7 @@ def ray_initializer_node(epoch=_RUN_EPOCH):
         "reuse_epoch": epoch}}
 
 
-def ray_base(save_prefix, steps, epoch=_RUN_EPOCH):
+def ray_base(save_prefix, steps, epoch):
     """Resident base graph. 904/905 evict the VAE around the CLIP use; 903 evicts it
     after decoding and also frees the ray workers' cached CUDA pool."""
     return {
@@ -172,8 +179,7 @@ def add_analyze_and_save(g, clip_idx):
         "handover": ["200", 0]}}
 
 
-def seg0_graph(prompt, w, h, dur, seed, tag, steps, first_img=None, last_img=None,
-               epoch=_RUN_EPOCH):
+def seg0_graph(prompt, w, h, dur, seed, tag, steps, epoch, first_img=None, last_img=None):
     """fl2va first segment (H3ContinuousStartV14). Optional first/last image become
     Start.first_frame / last_frame (VAE-encoded anchors)."""
     g = ray_base("video/chain/%s/seg_0" % tag, steps, epoch)
@@ -193,7 +199,7 @@ def seg0_graph(prompt, w, h, dur, seed, tag, steps, first_img=None, last_img=Non
     return g
 
 
-def cont_graph(prompt, w, h, dur, seed, tag, clip_idx, ctx_abs, steps, epoch=_RUN_EPOCH):
+def cont_graph(prompt, w, h, dur, seed, tag, clip_idx, ctx_abs, steps, epoch):
     g = ray_base("video/chain/%s/seg_%d" % (tag, clip_idx - 1), steps, epoch)
     g["144"]["inputs"]["noise_seed"] = seed
     g["150"] = {"class_type": LOAD_CLS, "inputs": {"latent_path": ctx_abs, "clip_index": clip_idx - 1}}
@@ -430,6 +436,7 @@ def _signal_cleanup(signum, frame):
     if _comfy_managed.get("needed"):
         try:
             service_stop()
+            state_clear()
         except Exception as e:
             print("service_stop error: %r" % e, flush=True)
     os._exit(128 + signum)
@@ -458,6 +465,62 @@ def restart_service():
     sys.exit("restart: service did not come up")
 
 
+def service_pid():
+    """Pid of the running ComfyUI service, or None."""
+    out = subprocess.run(["pgrep", "-f", "main.py --listen 0.0.0.0 --port 8188"],
+                         capture_output=True, text=True).stdout.split()
+    return int(out[0]) if out else None
+
+
+def _service_up():
+    try:
+        http_json(API + "/system_stats", timeout=5)
+        return True
+    except Exception:
+        return False
+
+
+def state_read():
+    try:
+        with open(STATE_PATH) as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def state_write(epoch):
+    with open(STATE_PATH, "w") as fh:
+        json.dump({"pid": service_pid(), "epoch": int(epoch), "unet": UNET_FL2VA}, fh)
+
+
+def state_clear():
+    try:
+        os.remove(STATE_PATH)
+    except FileNotFoundError:
+        pass
+
+
+def ensure_service():
+    """Return the reuse_epoch to embed in this run's graphs.
+
+    Resident by default: when the service is up, is the process recorded in the
+    state file, and still holds the same UNet, reuse it untouched -- the raylight
+    workers and the FSDP shards stay loaded, so segment 1 starts warm instead of
+    paying the ~3 min cold load. Anything else falls back to stop+start (harmless
+    when already down) and mints a new epoch, which makes the persist guard rebuild
+    ray and reload the UNet.
+    """
+    pid = service_pid()
+    st = state_read()
+    if pid and st.get("pid") == pid and st.get("unet") == UNET_FL2VA and st.get("epoch") and _service_up():
+        print("[resident] reusing service pid=%s (epoch=%s)" % (pid, st["epoch"]))
+        return int(st["epoch"])
+    restart_service()
+    epoch = int(time.time_ns())
+    state_write(epoch)
+    return epoch
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--prompt", required=True)
@@ -481,9 +544,9 @@ def main():
                     help="fl2va first segment: Start.last_frame (end-frame anchor).")
     ap.add_argument("--clean", action="store_true",
                     help="wipe the global chain slots before running (fresh chain).")
-    ap.add_argument("--clear", choices=["restart", "prewarm", "none"], default="restart",
-                    help="(Ignored) The managed lifecycle always does stop-then-start "
-                         "before a real run and stops the service on exit.")
+    ap.add_argument("--stop-when-done", action="store_true",
+                    help="stop ComfyUI after a successful run instead of leaving it "
+                         "resident for the next run (frees the GPUs while idle).")
     a = ap.parse_args()
     # Managed ComfyUI lifecycle: on SIGTERM/SIGINT (e.g. a web cancel sends
     # SIGTERM) we stop the service before exiting so the GPU is never left busy.
@@ -501,13 +564,14 @@ def main():
         print("all clips present")
         if not a.merge:
             return
-    # ---- managed ComfyUI lifecycle ----
-    # The service is restarted once per run (clean CUDA state, no resident shards
-    # from a previous run) and stopped on exit. Segments inside the run never
-    # restart it: the FSDP UNet stays resident for all of them and the text
-    # encoder is dispatched only when the conditioning cache misses.
+    # ---- ComfyUI lifecycle ----
+    # Resident by default: reuse the running service and its loaded FSDP UNet when
+    # it is the one we left behind, otherwise stop+start. Segments inside a run
+    # never restart it, and a successful run leaves it up for the next run.
+    epoch = None
+    run_ok = False
     if run_needed:
-        restart_service()
+        epoch = ensure_service()
         _comfy_managed["needed"] = True
     try:
         raw = {}
@@ -516,14 +580,13 @@ def main():
         # an empty GPU). A miss on the conditioning cache here costs one encoder
         # round trip (~12s) on top of the resident shards; a repeated prompt -- the
         # normal case for a single-prompt chain -- costs nothing.
-        epoch = _RUN_EPOCH
         for ci in range(existing + 1, a.segments + 1):
             seg_prompt = a.prompt
             if beats.get(ci - 1):
                 seg_prompt = a.prompt + "\n\n" + " ".join(beats[ci - 1])
             if ci == 1:
                 g = seg0_graph(seg_prompt, a.width, a.height, a.dur, seed, a.tag, a.steps,
-                               a.first_image, a.last_image, epoch)
+                               epoch, a.first_image, a.last_image)
             else:
                 g = cont_graph(seg_prompt, a.width, a.height, a.dur, seed, a.tag, ci,
                                slot_path(ci - 1), a.steps, epoch)
@@ -554,9 +617,16 @@ def main():
             print("stitching:", [(os.path.basename(p[0]), p[1], p[2]) for p in pieces])
             stitch(pieces, final_path)
             print("FINAL", final_path)
+        run_ok = True
     finally:
         if _comfy_managed.get("needed"):
-            service_stop()
+            if run_ok and not a.stop_when_done:
+                state_write(epoch)
+                print("[resident] leaving ComfyUI up (pid=%s, epoch=%s) for the next run; "
+                      "stop.sh frees the GPUs" % (service_pid(), epoch))
+            else:
+                service_stop()
+                state_clear()
 
 
 if __name__ == "__main__":

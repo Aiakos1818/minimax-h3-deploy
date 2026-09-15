@@ -14,10 +14,30 @@
 | RayInitializer | `sync_ulysses=False`，`KV_INT8=off` | `sync_ulysses=True`，`KV_INT8=v`（见六节：当前不生效） |
 | `reuse_epoch` | 按 prompt 变化点递增（触发 ray 重建 + FSDP 重载） | **整 run 恒定**（不重建、不重载） |
 | 段间/首段后 restart 服务 | 有（换 unet / 有素材时） | **无** |
+| run 之间的服务 | 每 run stop→start（跑完必 stop） | **默认常驻**，下一轮复用（见一·B） |
 | 首段素材 | fl2va 锚图 或 ref2va（参考图/视频/音频） | **只 fl2va**（文本 / `--first-image` / `--last-image`） |
 | slot 清理 | 靠 web 的 `clean_slots` | CLI `--clean` |
 
-服务仍然**每 run 接管一次**（跑段前 stop→start，结束必 stop），但 run 内所有段共用同一批 ray worker 和同一份 FSDP 分片。
+## 一·B、ComfyUI 生命周期：**默认常驻**
+
+成功跑完一轮**不 stop**，服务与 ray worker、已装载的 FSDP 分片原地保留，下一轮直接复用——冷启动（服务 ~15s + ray 重建 + FSDP 首次装载，合计 ~240s）**每个服务实例只付一次**，不是每 run 付一次。
+
+复用判定（`ensure_service()`）：
+
+1. 服务进程存在（`pgrep main.py --listen ...`）；
+2. 状态文件 `~/MiniMax-H3-Deploy/.v3_service.json` 记录的 `pid` 与当前一致；
+3. 记录里的 `unet` 与本次一致；
+4. `:8188` 有响应。
+
+四条全中 → 复用（日志 `[resident] reusing service pid=... (epoch=...)`）且**沿用同一个 `reuse_epoch`** → persist guard 命中，worker 与 FSDP 都不重建。任一条不中 → `stop.sh` + `start-comfyui-for-minimax-h3.sh` 全新启动，并写入新 epoch（新 epoch 会强制重建 ray worker 并重载 FSDP，即"全新冷启动"）。
+
+- `--stop-when-done`：成功后照样 stop（并清状态文件），空闲时把卡还回来。
+- **失败/异常/超时**：一律 stop + 清状态文件（不留半坏的常驻态给下一轮）。
+- **SIGTERM/SIGINT（取消）**：同上，stop + 清状态文件。
+- 常驻空闲时每卡仍占 ~11.9G（FSDP 分片 + 主进程模型）；想立刻释放就 `~/ComfyUI-Deploy/stop.sh`。
+- 想强制全新服务：先 `stop.sh`（状态判定自然失效）再跑。
+
+run 内所有段仍共用同一批 worker 和同一份 FSDP 分片。
 
 ## 二、图接线（常驻底座）
 
@@ -86,7 +106,7 @@ cd ~/MiniMax-H3-Deploy
 - `--dur` 是"Net New Content"净新内容秒数；段 2..N 的总 latent = 净新 + 39 帧保护上下文（17k+5 对齐）。
 - `--beat <秒:描述>`（可重复）仍保留（v2 语义）；**固定 prompt 的链用不到**，一次 encode 全段复用。
 - `--clean`：清 `output/h3_continuous/chain_*.safetensors`（slot 文件名**全局不分 tag**，换任务必须清，否则会接着上一条链续拍）。
-- `--clear`：保留解析但**忽略**（托管生命周期恒为 stop→start）。
+- `--stop-when-done`：跑完 stop（默认常驻不 stop，见一·B）。
 - 产物：`output/video/chain/<tag>/seg_<i>_*.mp4`、slot `output/h3_continuous/chain_*.safetensors`、合并 `output/final_<tag>.mp4`（按 handover 元数据裁掉每段不可用尾/保护头，pts 单调）。
 
 ## 五、实测（2×2080Ti，864×480，8 步，int4 CLIP + int8 UNet）
@@ -96,6 +116,16 @@ cd ~/MiniMax-H3-Deploy
 | v3v2 | 固定 prompt，dur4 | 219.5s | **135.2s** | 191 帧 | 段 1 冷启动；段 2 缓存 HIT、零上卡 |
 | v3v3 | 首+末帧锚图，dur4 | 338.2s | 140.2s | 174 帧 | 锚图段 MISS 一次（dispatch 11.06s + 带图 encode 11.31s + 卸载 0.13s） |
 | v3v4 | 边界 dur8 | 426.9s | **250.2s** | 361 帧 / 15.04s | 段 1 = 192 帧、段 2 = 226 帧；峰值 **21.47/21.45G**（上限 21.48） |
+
+常驻复用的收益（同一 prompt，dur4/8 步，连续两轮，第二轮起手复用上一轮的服务）：
+
+| 轮次 | 段 1 | 段 2 | 说明 |
+|---|---|---|---|
+| v3r1（冷） | 242.8s | 135.1s | 服务 12.3s 拉起 + ray 重建 + FSDP 首次装载 |
+| v3r2（复用） | **95.4s** | 135.1s | `[resident] reusing service pid=...`；不重启、不重建 worker、不重载 FSDP |
+| v3r3（复用 + `--stop-when-done`） | 50.0s（dur2/48 帧） | — | 跑完 stop，显存归零、状态文件清除 |
+
+即跨 run 复用让"每轮的第一个段"从 ~240s 降到 ~95s（2.5×）。
 
 编码器成本（日志 `H3 Qwen model-parallel timing`）：
 
@@ -107,7 +137,7 @@ cd ~/MiniMax-H3-Deploy
 ## 六、边界与注意
 
 - **帧数边界 ≈226 帧 @864×480**（峰值 21.47/21.48G，已贴顶）。再抬帧数或分辨率会 OOM；要更长的单段只能降分辨率，或回到 v2 的"每段短一点但更多段"。
-- **段 1 的固定成本**：服务拉起 14.3–18.4s + ray 重建 + FSDP 首次装载 ≈ 180–200s；段 2+ 才是稳态（135–250s，取决于帧数）。所以段数少时不划算。
+- **段 1 的固定成本**：服务拉起 12–18s + ray 重建 + FSDP 首次装载 ≈ 180–240s，**每个服务实例只付一次**（默认常驻 → 后续 run 复用，段 1 降到 ~95s）；段 2+ 是稳态（135–250s，取决于帧数）。
 - **锚图的额外成本**：段 1 +120s 量级（VAE 关键帧编码 + 带图 encode），且 handover 会切掉更多不可用尾（锚图锁末帧 → tail 34 帧 vs 普通 17 帧）。
 - **`RAYLIGHT_ULYSSES_KV_INT8="v"` 当前不生效**：raylight 打印 `enabled but RAYLIGHT_ULYSSES_HEAD_CHUNK is 0; using the regular FP16 Ulysses path`。要真启用需 `RAYLIGHT_ULYSSES_HEAD_CHUNK>0`，但那会改变采样轨迹（质量未验），v3 不采用——别把 `"v"` 当成省显存手段。
 - slot 全局不分 tag；同时只跑一条链。
@@ -134,3 +164,5 @@ cd ~/MiniMax-H3-Deploy
 ```
 
 判据：段 2 无 OOM、`h3_cond_cache: HIT`、无 `[GUARD] ... REBUILD`；合并产物 pts 单调且带音轨。
+
+常驻复用判据：第一轮结束时 `pgrep -f "main.py --listen"` 仍在、`~/MiniMax-H3-Deploy/.v3_service.json` 存在；紧接着跑第二轮应打印 `[resident] reusing service pid=...`，且段 1 明显快于冷启动；`--stop-when-done` 之后服务应已停、状态文件消失。

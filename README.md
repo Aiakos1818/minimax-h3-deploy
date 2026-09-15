@@ -165,7 +165,9 @@ CLIP+UNET 常驻后每卡只剩 ~3.2GB，而视频 VAE 编/解码需要 ~2.4GB �
 # 产物 output/final_film.mp4（按 handover 元数据自动裁掉每段的不可用尾/保护头）
 ```
 
-实测（864×480 / 8 步）：段 1 冷启动 219.5s、段 2 **135.2s**（无 OOM、零上卡）；单段帧数上限约 **226 帧**（CLIP 也常驻的旧档只有 ~107，段 2 必 OOM）。`--dur` 用 "Net New Content" 语义，续段总长 = 净新内容 + 39 帧保护上下文。细节、边界与踩坑见 [`docs/chain_director_v3.md`](docs/chain_director_v3.md)。
+**默认常驻**：跑完不 `stop.sh`，服务 + ray worker + 已装载 FSDP 原样留给下一轮（`--stop-when-done` 则跑完释放；失败/取消一律 stop）。复用判定看进程 pid + 状态文件 `~/MiniMax-H3-Deploy/.v3_service.json`，命中就连 `reuse_epoch` 一起沿用，不重启、不重建、不重载；空闲时每卡仍占 ~11.9G，手动 `stop.sh` 可立刻释放。
+
+实测（864×480 / 8 步）：冷启动段 1 242.8s → **复用后段 1 95.4s（2.5×）**，段 2 **135.2s**（无 OOM、零上卡）；单段帧数上限约 **226 帧**（CLIP 也常驻的旧档只有 ~107，段 2 必 OOM）。`--dur` 用 "Net New Content" 语义，续段总长 = 净新内容 + 39 帧保护上下文。细节、边界与踩坑见 [`docs/chain_director_v3.md`](docs/chain_director_v3.md)。
 
 ## 实测（864x480 / 20 步 / 模型常驻）
 
