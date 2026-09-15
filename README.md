@@ -125,7 +125,14 @@ cat start.sh
 | `komikndr/raylight` | `Aiakos1818/raylight` : `dual-2080ti-persist` | 8 文件 +622/-48：persist 复用（`reuse_epoch`，段间不重载）、cond_audio / denoise mask、H3 xdit 补丁（`diffusion_models/minimax/xdit_context_parallel.py`）、pipelined Ulysses（新模块 `distributed_modules/pipelined_ulysses.py`）、失败 actor 终止清理、`comfy_extra_dist/nodes_custom_sampler.py` 取样结果处理 |
 | `1506086927/SageAttention2_Optimized_Test` | `Aiakos1818/SageAttention2_Optimized_Test` : `sm75-2080ti` | `setup.py`：`-std=c++20`、`--cudart=static`、跳过 torch CUDA 版本检查，使 SM75 可编译 |
 
-仅记录 revision、未改动的参考项目：`HerrgottMargott/Herrgotts-H3-Infinite-Continuation-Suite` (v1.4.0)、`NikoDemon80/ComfyUI-H3-Motion-Context`。
+**未改动源码、但同样镜像备份的参考项目**（防上游删除）：
+
+| 上游 | 镜像 fork | 我们用的版本 | 说明 |
+|---|---|---|---|
+| `HerrgottMargott/Herrgotts-H3-Infinite-Continuation-Suite` | `Aiakos1818/Herrgotts-H3-Infinite-Continuation-Suite` | **v1.4.0**（本地与 fork HEAD 逐字节一致，37/37 文件） | masked-AV 多段续接链 |
+| `NikoDemon80/ComfyUI-H3-Motion-Context` | `Aiakos1818/ComfyUI-H3-Motion-Context` | **v0.6.0**（本地与该 tag 逐字节一致） | 尾帧/尾音锚定续接（对照用）。恢复我们用的版本：`git checkout v0.6.0` |
+
+> ⚠️ Motion-Context 上游已到 **0.6.2**：新增 `_under_output()`，把 `latent_path` 限制在 ComfyUI `output/` 目录内（修潜在路径穿越/任意删除）。我们用的 0.6.0 没有这个约束，若工作流接受外部传入的 `latent_path`，**建议升级到 0.6.2**（该节点我们没有本地改动，直接更新即可）。
 
 ## 本仓库内容
 
