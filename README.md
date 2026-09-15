@@ -51,7 +51,7 @@ git clone -b dual-2080ti-persist https://github.com/Aiakos1818/raylight.git cust
 git clone https://github.com/Aiakos1818/minimax-h3-deploy.git /tmp/h3deploy
 cp -r /tmp/h3deploy/nodes/* custom_nodes/
 cp /tmp/h3deploy/workflows/*.json user/default/workflows/     # 只需放要用的
-cp /tmp/h3deploy/start.sh /tmp/h3deploy/stop.sh .             # 双卡启动脚本
+cp /tmp/h3deploy/scripts/start.sh /tmp/h3deploy/scripts/stop.sh .   # 双卡启动/停止
 
 # (d) sm75 的 SageAttention（若要用 sage attention 后端）
 git clone -b sm75-2080ti https://github.com/Aiakos1818/SageAttention2_Optimized_Test.git
@@ -142,9 +142,8 @@ cat start.sh
 nodes/                            # ← ComfyUI custom_nodes/{comfyui_h3_multigpu_clip,h3_vae_unload} 软链指向这里
 workflows/                        # ← ComfyUI user/default/workflows 软链指向这里（= 浏览器的工作流列表）
 workflows/api/                    # API 格式模板（gen.py/gen_dual.py 用；浏览器默认不列出）
-scripts/                          # chain_director_v3（续接链：UNET 常驻 + CLIP 按需上卡）/ v2（persist 对照）、web 控制台 v3_web(:8190) / v2_web(:8189)、gen/gen_dual
+scripts/                          # chain_director_v3（续接链：UNET 常驻 + CLIP 按需上卡）/ v2（persist 对照）、web 控制台 v3_web(:8190) / v2_web(:8189)、gen/gen_dual、start.sh/stop.sh（双卡启动/停止，与 ~/ComfyUI-Deploy 的同名文件一致）
 docs/                             # 部署与踩坑文档（audio / chain_director_v1-v3 / gen_dual / gen）
-start.sh stop.sh                  # 双卡启动脚本（与 ~/ComfyUI-Deploy 的同名文件保持一致）
 ```
 
 ComfyUI 引擎在另一个仓库 `~/ComfyUI-Deploy`，与本目录通过软链共享节点和工作流：

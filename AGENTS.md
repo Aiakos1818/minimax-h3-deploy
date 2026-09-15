@@ -15,6 +15,6 @@ ComfyUI 引擎在 `~/ComfyUI-Deploy`，通过软链共享本目录的节点与�
 
 - **提交/推送前必须先征得用户确认**：可以准备好改动并给出 `git status` + `git diff --stat` 摘要，但不要自行 `git commit` / `git push`。
 - 提交前先看 `git status --porcelain`，确认没有模型/缓存/大文件混入（忽略规则见 `.gitignore`）。
-- 运行入口：`scripts/start-comfyui-for-minimax-h3.sh`（RAY env + `--lowvram --reserve-vram 11.5` + `--use-sage-attention` + `--disable-dynamic-vram --disable-cuda-malloc`）与 `~/ComfyUI-Deploy/stop.sh`；根目录的 `start.sh`/`stop.sh` 与 `~/ComfyUI-Deploy/` 的同名文件保持一致，基本不改。
+- 运行入口：`scripts/start-comfyui-for-minimax-h3.sh`（RAY env + `--lowvram --reserve-vram 11.5` + `--use-sage-attention` + `--disable-dynamic-vram --disable-cuda-malloc`）与 `~/ComfyUI-Deploy/stop.sh`；`scripts/start.sh`/`scripts/stop.sh` 与 `~/ComfyUI-Deploy/` 的同名文件保持一致，基本不改。
 - 续接链现行主线是 `scripts/chain_director_v3.py`（常驻 UNet、服务默认常驻、CLIP 按需上下卡）；需要 ref2va 参考素材时用 `scripts/chain_director_v2.py`。
 - API 模板在 `workflows/api/`（`gen.py`/`gen_dual.py` 使用）；浏览器工作流列表只看 `workflows/*.json`（非递归）。
