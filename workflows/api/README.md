@@ -10,8 +10,11 @@
 | `video_minimax_h3_i2v.json` | `api_video_minimax_h3_i2v.json` | 同上 i2v |
 | `video_minimax_h3_raylight_fl2v.json` | `api_video_minimax_h3_raylight_fl2v.json` | 双卡 raylight 前端版（int8 CLIP + fp16 VAE + `clear=true`） |
 | `video_minimax_h3_raylight_ref2v.json` | `api_video_minimax_h3_raylight_ref2v.json` | 双卡 raylight ref2v（参考图/视频/音频） |
+| `image_z_image_turbo.json`（本地保留） | `api_image_z_image_turbo.json` | Z-Image-Turbo 文生图（非 H3；出片首帧锚图用） |
 
-`image_z_image_turbo.json` 是非 H3 工作流（本地保留、未纳入版本库），没有 API 对应文件。
+`image_z_image_turbo.json` 的 UI 文件是 subgraph 结构，`ui2api.py` 会拒绝转换，因此
+`api_image_z_image_turbo.json` 是**手工转换**并对照 `/object_info` 校验过的版本（节点 id
+沿用子图内部 id：27=文本、13=宽高、3=seed/steps、9=输出前缀）。
 
 ## 用法（curl）
 

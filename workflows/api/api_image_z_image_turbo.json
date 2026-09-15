@@ -1,0 +1,110 @@
+{
+  "30": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen_3_4b.safetensors",
+      "type": "lumina2",
+      "device": "default"
+    }
+  },
+  "27": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "Cinematic 21:9 widescreen night scene in a sunflower field. A tall, elegant East Asian young woman with long flowing crimson-red hair (half tied up), fair skin and red lips, wearing an off-shoulder dark red hanfu-style flowing maxi dress with translucent sheer sleeves and a waist sash, barefoot, standing on a dirt path and gazing calmly to the side; her raised hand holds a small smoking pipe with a thin wisp of smoke curling upward. In the left foreground stands a small, chubby orange creature with scaly skin, its entire head engulfed in bright orange-yellow flames forming a fiery mane, glowing warmly and illuminating the ground around it. Tall sunflowers with large golden-yellow blooms and dark green leaves frame both sides of the frame. Deep blue starry night sky, a large bright full moon in the upper right, thin wisps of smoke and faint clouds drifting around the moon, dark tree silhouettes on the horizon, subtle mist near the ground. Cool moonlight contrasts with the warm firelight, dreamy and mysterious atmosphere. Chinese xianxia fantasy 3D CGI animation style, cinematic movie still, low-angle dramatic composition, volumetric light, high detail, sharp focus, 8K.",
+      "clip": [
+        "30",
+        0
+      ]
+    }
+  },
+  "33": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": {
+      "conditioning": [
+        "27",
+        0
+      ]
+    }
+  },
+  "28": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "z_image_turbo_bf16.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "11": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+      "model": [
+        "28",
+        0
+      ],
+      "shift": 3.0
+    }
+  },
+  "13": {
+    "class_type": "EmptySD3LatentImage",
+    "inputs": {
+      "width": 1280,
+      "height": 480,
+      "batch_size": 1
+    }
+  },
+  "3": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "11",
+        0
+      ],
+      "seed": 286442323579579,
+      "steps": 20,
+      "cfg": 1.0,
+      "sampler_name": "res_multistep",
+      "scheduler": "simple",
+      "positive": [
+        "27",
+        0
+      ],
+      "negative": [
+        "33",
+        0
+      ],
+      "latent_image": [
+        "13",
+        0
+      ],
+      "denoise": 1.0
+    }
+  },
+  "29": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "3",
+        0
+      ],
+      "vae": [
+        "29",
+        0
+      ]
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "8",
+        0
+      ],
+      "filename_prefix": "z-image-turbo"
+    }
+  }
+}
