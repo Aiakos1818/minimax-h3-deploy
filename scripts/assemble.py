@@ -6,7 +6,7 @@ cropped to --aspect, and re-encoded once so the crop, the global fade in/out and
 optional freeze frame before the closing fade are baked in. Audio keeps the source
 rate (32k) and gets a short edge fade at every cut so hard cuts do not click.
 
-  assemble.py --out output/final_pf01.mp4 --aspect 2.39 --fade-in 0.5 --fade-out 1.0 \
+  assemble.py --out output/final_<film>.mp4 --aspect 2.39 --fade-in 0.5 --fade-out 1.0 \
       --hold 0.6 --clip a.mp4 --clip b.mp4
 """
 import argparse
