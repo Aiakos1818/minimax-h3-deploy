@@ -173,6 +173,34 @@ def external_chain_pids(own_children):
     return pids
 
 
+def _nvidia_vram():
+    """{index: (total_bytes, used_bytes)} from nvidia-smi, {} if unavailable.
+
+    ComfyUI's /system_stats vram_total comes from torch.cuda.mem_get_info, i.e.
+    the CUDA-usable total (physical minus the driver-reserved block, ~530 MiB on
+    the 22G 2080 Ti), so it reads 21.5G. Query nvidia-smi directly to show the
+    physical capacity the operator expects (22G), with `used` on the same basis.
+    """
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,memory.total,memory.used",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return {}
+    stats = {}
+    for ln in out.splitlines():
+        parts = [p.strip() for p in ln.split(",")]
+        if len(parts) != 3:
+            continue
+        try:
+            stats[int(parts[0])] = (int(parts[1]) * 1048576,
+                                    int(parts[2]) * 1048576)
+        except ValueError:
+            continue
+    return stats
+
+
 class ComfyHealth:
     def __init__(self, base):
         self.base = base
@@ -190,12 +218,17 @@ class ComfyHealth:
         try:
             raw = json.loads(urllib.request.urlopen(self.base + "/system_stats", timeout=3).read())
             up, ms = True, int((time.time() - t0) * 1000)
+            nv = _nvidia_vram()
             for dev in (raw.get("devices") or []):
                 total = dev.get("vram_total") or 0
                 if not total:
                     continue
+                used = total - (dev.get("vram_free") or 0)
+                nvd = nv.get(dev.get("index"))
+                if nvd:
+                    total, used = nvd
                 vram.append({"name": (dev.get("name") or "?").split(" : ")[0],
-                             "used": total - (dev.get("vram_free") or 0), "total": total})
+                             "used": used, "total": total})
         except Exception:
             up, ms = False, None
         with self._lock:
