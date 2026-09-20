@@ -122,7 +122,7 @@ cd ~/MiniMax-H3-Deploy
 | 引擎 | text / i2v / ref（ref2va 素材） | **text / i2v**（fl2va only） |
 
 ```bash
-~/ComfyUI-Deploy/comfyenv/bin/python scripts/chain_director_v3_web.py --daemon   # 0.0.0.0:8190
+~/ComfyUI-Deploy/comfyenv/bin/python scripts/chain_director_v3_web.py --start   # 0.0.0.0:8190
 ~/ComfyUI-Deploy/comfyenv/bin/python scripts/chain_director_v3_web.py --status
 ~/ComfyUI-Deploy/comfyenv/bin/python scripts/chain_director_v3_web.py --stop
 ```

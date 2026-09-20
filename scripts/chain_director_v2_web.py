@@ -11,7 +11,7 @@ default so other LAN machines can drive chain_director_v2.py without ssh:
 
 Runtime / control:
   start (foreground):   ~/ComfyUI-Deploy/comfyenv/bin/python ~/MiniMax-H3-Deploy/scripts/chain_director_v2_web.py
-  start (daemon):       ~/ComfyUI-Deploy/comfyenv/bin/python ~/MiniMax-H3-Deploy/scripts/chain_director_v2_web.py --daemon
+  start (background):   ~/ComfyUI-Deploy/comfyenv/bin/python ~/MiniMax-H3-Deploy/scripts/chain_director_v2_web.py --start
   stop:                 ~/ComfyUI-Deploy/comfyenv/bin/python ~/MiniMax-H3-Deploy/scripts/chain_director_v2_web.py --stop
   status:               ~/ComfyUI-Deploy/comfyenv/bin/python ~/MiniMax-H3-Deploy/scripts/chain_director_v2_web.py --status
 
@@ -29,7 +29,7 @@ Guards / conventions (mirror the CLI docs):
 
 Layout under the data dir (default ~/MiniMax-H3-Deploy/.h3web):
   h3web.pid                 daemon pid
-  h3web.log                 daemon stdout/stderr (only when --daemon)
+  h3web.log                 daemon stdout/stderr (only when --start)
   jobs/<job_id>/config.json  job config + staged upload paths
   jobs/<job_id>/log.txt      child process stdout/stderr
   jobs/<job_id>/status.json  status snapshot (recovery / history)
@@ -1897,7 +1897,7 @@ def main():
     ap.add_argument("--driver", default=None,
                     help="chain_director_v2.py path (default: same dir as this script)")
     ap.add_argument("--comfy-base", default=COMVFY_BASE)
-    ap.add_argument("--daemon", action="store_true", help="background via setsid+nohup")
+    ap.add_argument("--start", action="store_true", help="background via setsid+nohup")
     ap.add_argument("--stop", action="store_true")
     ap.add_argument("--status", action="store_true")
     a = ap.parse_args()
@@ -1954,9 +1954,9 @@ def main():
             print("state query failed:", e)
         return
 
-    if a.daemon:
+    if a.start:
         if sys.platform == "win32":
-            print("--daemon 仅支持 POSIX; 前台运行")
+            print("--start 仅支持 POSIX; 前台运行")
         else:
             env = dict(os.environ, _H3WEB_DAEMON="1")
             pid = os.fork()

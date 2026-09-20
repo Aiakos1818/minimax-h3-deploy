@@ -204,7 +204,7 @@ resident 续段采样 → 脚本在 clip2 前**自动 restart 一次**（~16s）
   跑段前 stop→start 接管并等待 :8188 就绪、跑段结束（含 SIGTERM/异常）恒 stop 释放 GPU
   （`--clear` 被忽略）；任务内 segments 2..N 复用 FSDP；含 merge 与 stitch 时间戳修复。
 - **chain_director_v2_web.py**（局域网 Web 控制台，stdlib-only）：在 GPU 宿主与
-  ComfyUI 同机常驻，`~/ComfyUI-Deploy/comfyenv/bin/python ~/MiniMax-H3-Deploy/scripts/chain_director_v2_web.py --daemon`
+  ComfyUI 同机常驻，`~/ComfyUI-Deploy/comfyenv/bin/python ~/MiniMax-H3-Deploy/scripts/chain_director_v2_web.py --start`
   （`--stop`/`--status`），默认监听 `0.0.0.0:8189`（可用 `http://<宿主IP>:8189` 从
   其它局域网机器访问）。它镜像 v2 全部 CLI 参数并支持素材上传、串行任务队列、
   流式日志/阶段徽标、取消、结果在线预览（Range）与"续拍"；每个 web 任务默认

@@ -180,7 +180,7 @@ CLIP+UNET 常驻后每卡只剩 ~3.2GB，而视频 VAE 编/解码需要 ~2.4GB �
 
 实测（864×480 / 8 步）：冷启动段 1 242.8s → **复用后段 1 95.4s（2.5×）**，段 2 **135.2s**（无 OOM、零上卡）；单段帧数上限约 **226 帧**（CLIP 也常驻的旧档只有 ~107，段 2 必 OOM）。`--dur` 用 "Net New Content" 语义，续段总长 = 净新内容 + 39 帧保护上下文。
 
-Web 控制台：`scripts/chain_director_v3_web.py --daemon`（默认 :8190、独立数据目录 `.h3web_v3/`；原有 `chain_director_v2_web.py` 保持原样驱动 v2/ref2va，两者可并用）。细节、边界与踩坑见 [`docs/chain_director_v3.md`](docs/chain_director_v3.md)。
+Web 控制台：`scripts/chain_director_v3_web.py --start`（默认 :8190、独立数据目录 `.h3web_v3/`；原有 `chain_director_v2_web.py` 保持原样驱动 v2/ref2va，两者可并用）。细节、边界与踩坑见 [`docs/chain_director_v3.md`](docs/chain_director_v3.md)。
 
 ## 实测（864x480 / 20 步 / 模型常驻）
 
