@@ -159,10 +159,54 @@ cd ~/MiniMax-H3-Deploy
 
 采样步速随帧数上升（同 8 步）：107 帧 6.58 s/it → 192 帧 14.7 s/it → 226 帧 19.5 s/it。
 
+## 五·B、段内阶段分解与两卡负载（2026-09-22 实测）
+
+一次冷启动两段跑（`--segments 2 --dur 2 --steps 8 --width 864 --height 480`，纯文本，无锚图），用 `nvidia-smi -lms 200`（CSV 带 timestamp 列）采两卡显存/利用率，ComfyUI 日志经时间戳管道对齐。原始数据：`~/Temp/opencode/{bench_gpu.csv,bench_comfy.ts.log,bench_driver.log}`。
+
+### 段 1（Start，含冷启动）`Prompt executed in 124.67s`
+
+| 阶段 | 时长 | GPU0 均值/峰值 MiB | GPU1 均值/峰值 MiB | GPU0 util | GPU1 util |
+|---|---|---|---|---|---|
+| 服务启动 | 18s | 76/175 | 8/9 | 0% | 0% |
+| VAE+CLIP 载入（CPU，不上卡） | 7s | 175 | 161/165 | 0% | 0% |
+| CLIP dispatch/encode/offload | 16s | 5703/7841 | 2508/7295 | 6% | 5% |
+| `ray.init()` | 2s | 1713 | 219 | 5% | 8% |
+| **worker + FSDP 首次装载** | **51s** | 5060/**15887** | 3598/**14393** | 2% | 2% |
+| **采样 8 步** | 25s | 16502/16519 | 15008/15025 | **95%** | **95%** |
+| VAE 上卡 + 解码 | 22s | 13781/16519 | 12051/15025 | **73%** | **6%** |
+| 收尾 | 3s | 13502 | 11970 | 26% | 0% |
+
+### 段 2（Continue，稳态）`Prompt executed in 79.20s`
+
+| 阶段 | 时长 | GPU0 均值/峰值 MiB | GPU1 均值/峰值 MiB | GPU0 util | GPU1 util |
+|---|---|---|---|---|---|
+| 准备（LoadLatent + cond HIT + FSDP skip） | ~2s | 13467 | 11965 | 0% | 0% |
+| **采样 8 步** | ~42s | 18294/**18417** | 16792/**16915** | **97%** | **97%** |
+| **VAE 上卡 + 解码** | **29s** | 13786 | 11989 | **87%** | **2%** |
+| 分析 + 保存 + 收尾 | 3s | 13458 | 11905 | 35% | 0% |
+
+段 2 时间构成：采样 ~42s（53%）+ 解码 29s（37%）+ 其它 ~8s（10%）；cond HIT 使 CLIP 上卡为 0，FSDP 不重载。
+
+### 关键观测（修正此前文档）
+
+1. **采样期两卡不是镜像**：段 2 采样 GPU0 18417M vs GPU1 16915M，恒定差 **~1.5G**，且差异从 FSDP 装载期就存在（15887 vs 14393）。两卡 util 均 97%，接近饱和。
+2. **解码期 GPU1 几乎空闲**（2–6%），GPU0 忙（73–87%）。视频 VAE 分双卡的空间就在这里，但 GPU0 未满算力，实际收益应低于 2×。
+3. **VAE 上卡只要 1–3s**：日志 `Requested to load MiniMaxH3VideoVAE` → `loaded partially ... 2665.86 MB offloaded`（段 1 用 3s、段 2 用 1s）。此前 `gen_dual.md` §2.2 把"4.97G VideoVAE 装载"隐含成 28s 量级，实测否决——**"VAE 常驻"没有收益**（磁盘层被节点缓存命中，显存层仅一次 CPU→GPU）。
+4. **解码耗时与帧数线性**：56 帧 ≈ 17s、90 帧 ≈ 28s（≈ **0.31 s/帧**）。
+5. **本次冷启动远快于历史记录**：段 1 准备段合计 **76s**（CLIP encode 15s + `ray.init` 2s + worker/FSDP 装载 51s）。§六 记的"180–240s"是 int8 CLIP（dispatch 21–34s）+ 冷页缓存的结果；int4 CLIP（本次 `dispatch=11.966s encode=2.372s offload=0.115s`）与 warm mmap 下显著缩短。
+6. `RAYLIGHT_ULYSSES_KV_INT8` 未生效再次确认（`HEAD_CHUNK is 0; using the regular FP16 Ulysses path`）。
+
+### 由此得到的优化评估（均未实施）
+
+- **唯一确定值得做的**：视频 VAE 按 temporal chunk 分双卡（段 2 解码 29s、同期 GPU1 空闲）。改 `comfy/ldm/minimax/vae.py` 的 `decode_temporal`，把 chunk 分派到 2 device；因 GPU0 解码 util 仅 87%，收益保守估 **8–14s/段**，不要按 2× 估。
+- **已否决**：VAE 常驻（上卡仅 1–3s）；FSDP 软驻留（`gen_dual.md` §2.3，上游不支持，2 卡下不可靠）。
+- **低风险小项**：`wait_done` 轮询 5s→0.5s（`chain_director_v3.py:242`），多段链累计可省。
+- **无空间**：采样已 95–97% 饱和，除非动 KV int8（改采样轨迹，不采用）。
+
 ## 六、边界与注意
 
 - **帧数边界 ≈226 帧 @864×480**（峰值 21.47/21.48G，已贴顶）。再抬帧数或分辨率会 OOM；要更长的单段只能降分辨率，或回到 v2 的"每段短一点但更多段"。
-- **段 1 的固定成本**：服务拉起 12–18s + ray 重建 + FSDP 首次装载 ≈ 180–240s，**每个服务实例只付一次**（默认常驻 → 后续 run 复用，段 1 降到 ~95s）；段 2+ 是稳态（135–250s，取决于帧数）。
+- **段 1 的固定成本**：服务拉起 12–18s + ray 重建 + FSDP 首次装载 ≈ 180–240s，**每个服务实例只付一次**（默认常驻 → 后续 run 复用，段 1 降到 ~95s）；段 2+ 是稳态（135–250s，取决于帧数）。该 180–240s 是 int8 CLIP + 冷页缓存时代的数；int4 CLIP + warm mmap 下准备段已降到 **~76s**（见 五·B）。
 - **锚图的额外成本**：段 1 +120s 量级（VAE 关键帧编码 + 带图 encode），且 handover 会切掉更多不可用尾（锚图锁末帧 → tail 34 帧 vs 普通 17 帧）。
 - **`RAYLIGHT_ULYSSES_KV_INT8="v"` 当前不生效**：raylight 打印 `enabled but RAYLIGHT_ULYSSES_HEAD_CHUNK is 0; using the regular FP16 Ulysses path`。要真启用需 `RAYLIGHT_ULYSSES_HEAD_CHUNK>0`，但那会改变采样轨迹（质量未验），v3 不采用——别把 `"v"` 当成省显存手段。
 - slot 全局不分 tag；同时只跑一条链。
