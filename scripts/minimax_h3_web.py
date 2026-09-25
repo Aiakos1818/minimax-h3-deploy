@@ -27,7 +27,11 @@ MAX_IMAGES, MAX_VIDEOS, MAX_AUDIOS = 9, 3, 3
 MEDIA_KINDS = ("ref_image", "ref_video", "ref_audio")
 FRAME_KINDS = ("first_frame", "last_frame")
 MODES = ("t2v", "ref2v")
-OUT_SUBDIRS = {"t2v": "t2v", "ref2v": "ref2v"}
+OUT_SUBDIRS = {"t2v": "t2v", "ref2v": "ref2v", "edit": "edit"}
+TRANSITIONS = ("cut", "fade", "dissolve", "push")
+EDIT_ASPECT_OPTS = [("0", "原始画幅"), ("2.39", "2.39:1 宽银幕"), ("16:9", "16:9 横屏"),
+                    ("9:16", "9:16 竖屏"), ("1:1", "1:1 方形"), ("4:3", "4:3 横版"),
+                    ("3:4", "3:4 竖版")]
 DEFAULT_PROJECT = "default"
 DEFAULT_PROJECT_NAME = "默认项目"
 ASPECTS = ["16:9 (Widescreen)", "9:16 (Portrait Widescreen)", "1:1 (Square)",
@@ -112,6 +116,18 @@ def llm_optimize(prompt, counts):
 def ref2v_length(dur):
     base = max(5, int(round(dur * FPS)))
     return base + ((5 - base) % 17)
+
+
+def aspect_ratio(s):
+    """'2.39' / '16:9' / '0' (or '原始') -> a positive w/h float, 0 = source."""
+    s = str(s or "0").strip().split(" ")[0]
+    try:
+        if ":" in s:
+            a, b = s.split(":", 1)
+            return max(0.0, float(a) / float(b))
+        return max(0.0, float(s))
+    except (ValueError, ZeroDivisionError):
+        return 0.0
 
 
 def _safe_name(name):
@@ -451,6 +467,7 @@ class Manager:
     def project_info(self, pid, jobs=None):
         p = self.projects[pid]
         js = self._project_jobs(pid) if jobs is None else jobs
+        js = [j for j in js if (j["st"].get("mode") or "ref2v") != "edit"]
         counts = {"total": len(js), "running": 0, "queued": 0}
         cover = None
         cover_ts = ""
@@ -578,6 +595,8 @@ class Manager:
                 self.persist_status(job)
 
     def _stage(self, job):
+        if (job["st"].get("mode") or (job.get("cfg") or {}).get("mode")) == "edit":
+            return self._stage_edit(job)
         try:
             with open(job["log"], "rb") as f:
                 text = f.read().decode("utf-8", "replace")
@@ -637,10 +656,11 @@ class Manager:
     def _run(self, jid):
         job = self.jobs[jid]
         cfg = job["cfg"]
+        mode = cfg.get("mode", "ref2v")
         with open(job["log"], "a", encoding="utf-8") as log:
             log.write("=== job %s ===\n" % jid)
             t0 = time.time()
-            while not self._stop:
+            while mode != "edit" and not self._stop:
                 reasons = self.blocking_busy()
                 if not reasons:
                     break
@@ -654,8 +674,9 @@ class Manager:
                 if job["st"].get("cancel_requested"):
                     self._set(jid, "status", "cancelled", ended=NOW(), err="取消(等待中)")
                     return
-            os.makedirs(self._out_dir(cfg.get("mode", "ref2v"), cfg.get("project")), exist_ok=True)
-            argv = self._build_argv(cfg)
+            os.makedirs(self._out_dir(mode, cfg.get("project")), exist_ok=True)
+            out_path = os.path.join(self._out_dir(mode, cfg.get("project")), "%s.mp4" % cfg["tag"])
+            argv = self._edit_argv(cfg, out_path) if mode == "edit" else self._build_argv(cfg)
             log.write("cmd: %s\n\n" % " ".join(argv)); log.flush()
             env = dict(os.environ, PYTHONUNBUFFERED="1")
             popen = subprocess.Popen(argv, cwd=self.root, env=env, stdout=log,
@@ -683,15 +704,16 @@ class Manager:
                           err="已取消")
                 log.write("\n[web] cancelled rc=%s\n" % rc)
             elif rc == 0:
-                mode = cfg.get("mode", "ref2v")
                 p = os.path.join(self._out_dir(mode, cfg.get("project")), "%s.mp4" % cfg["tag"])
                 rel = os.path.relpath(p, self.out_root).replace("\\", "/")
                 size = os.path.getsize(p) if os.path.isfile(p) else 0
-                frames = ref2v_length(cfg["params"]["dur"])
+                frames = self._edit_total_frames(job) if mode == "edit" \
+                    else ref2v_length(cfg["params"]["dur"])
                 self._set(jid, "status", "done", ended=NOW(), exit=0, err=None,
                           duration=int(time.time() - job["st"].get("created_ts", time.time())),
                           clip_rel=rel if size else None, clip_size=size,
-                          clip_frames=frames, clip_seconds=round(frames / FPS, 2))
+                          clip_frames=frames,
+                          clip_seconds=(round(frames / FPS, 2) if frames else None))
                 log.write("\n[web] done rc=0 rel=%s size=%d\n" % (rel, size))
             else:
                 self._set(jid, "status", "failed", ended=NOW(), exit=rc,
@@ -808,6 +830,8 @@ class Manager:
         paths = glob.glob(os.path.join(out_root, "**", "*.mp4"), recursive=True)
         for p in sorted(paths, key=os.path.getmtime, reverse=True):
             rel = os.path.relpath(p, out_root).replace("\\", "/")
+            if "/edit/" in rel:
+                continue
             m = meta.get(os.path.basename(p), {})
             pid = m.get("project") or self._project_from_rel(rel)
             if project is not None and pid != project:
@@ -819,6 +843,144 @@ class Manager:
                           "frames": m.get("clip_frames"), "seed": m.get("seed"),
                           "params": m.get("params")})
         return {"clips": clips}
+
+    # ---- timeline / edit sequence ----
+    def _seq_path(self, pid):
+        return os.path.join(self._proj_dir(pid), "edit.json")
+
+    def load_sequence(self, pid):
+        try:
+            with open(self._seq_path(pid), encoding="utf-8") as f:
+                seq = json.load(f)
+        except Exception:
+            seq = {}
+        seq["aspect"] = str(seq.get("aspect") or "0")
+        seq["fade_in"] = _to_float(seq.get("fade_in"), 0.0, lo=0.0, hi=3.0)
+        seq["fade_out"] = _to_float(seq.get("fade_out"), 0.0, lo=0.0, hi=3.0)
+        seq["clips"] = [c for c in (seq.get("clips") or [])
+                        if isinstance(c, dict) and (c.get("rel") or "").strip()]
+        return seq
+
+    def _valid_clip(self, rel):
+        rel = (rel or "").strip()
+        if not rel or "/edit/" in rel:
+            return None
+        base = os.path.realpath(self.out_root)
+        cand = os.path.realpath(os.path.join(base, rel))
+        if not cand.startswith(base + os.sep) or not os.path.isfile(cand):
+            return None
+        return rel
+
+    def save_sequence(self, pid, seq):
+        if pid not in self.projects:
+            return None, "项目不存在"
+        clips = []
+        for c in (seq or {}).get("clips") or []:
+            rel = self._valid_clip((c or {}).get("rel"))
+            if not rel:
+                return None, "片段不存在：%s" % ((c or {}).get("rel") or "?")
+            t = (c or {}).get("trans") or {}
+            tt = t.get("type") if t.get("type") in TRANSITIONS else "cut"
+            dur = 0.0 if tt == "cut" else _to_float(t.get("dur"), 0.5, lo=0.1, hi=1.5)
+            clips.append({"rel": rel, "trans": {"type": tt, "dur": dur}})
+        out = {"aspect": str((seq or {}).get("aspect") or "0"),
+               "fade_in": _to_float((seq or {}).get("fade_in"), 0.0, lo=0.0, hi=3.0),
+               "fade_out": _to_float((seq or {}).get("fade_out"), 0.0, lo=0.0, hi=3.0),
+               "clips": clips}
+        os.makedirs(self._proj_dir(pid), exist_ok=True)
+        with open(self._seq_path(pid), "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+        return out, None
+
+    def submit_edit(self, pid, seq=None):
+        if pid not in self.projects:
+            return None, "项目不存在"
+        if seq is not None:
+            saved, err = self.save_sequence(pid, seq)
+            if err:
+                return None, err
+        else:
+            saved = self.load_sequence(pid)
+        if not saved.get("clips"):
+            return None, "时间线为空，请先添加片段"
+        jid = self.new_id()
+        cfg = {"mode": "edit", "project": pid, "tag": jid, "seed": None, "media": {},
+               "params": {"prompt": "剪辑 %d 段" % len(saved["clips"]),
+                          "dur": 0, "steps": 0, "aspect": saved["aspect"],
+                          "megapixels": 0, "ref_image_size": "match",
+                          "clips": len(saved["clips"])},
+               "seq": saved}
+        return self.submit(cfg, jid=jid), None
+
+    def delete_edit(self, jid):
+        with self.lock:
+            job = self.jobs.get(jid)
+            if not job:
+                return False, "不存在"
+            mode = job["st"].get("mode") or (job.get("cfg") or {}).get("mode")
+            if mode != "edit":
+                return False, "不是剪辑成片"
+            if job["st"].get("status") in ("running", "queued"):
+                return False, "运行中的任务请先取消"
+            rel = job["st"].get("clip_rel")
+            if rel:
+                base = os.path.realpath(self.out_root)
+                cand = os.path.realpath(os.path.join(base, rel))
+                if cand.startswith(base + os.sep) and os.path.isfile(cand):
+                    try:
+                        os.remove(cand)
+                    except OSError:
+                        pass
+            shutil.rmtree(self._job_dir(jid), ignore_errors=True)
+            del self.jobs[jid]
+        return True, "已删除成片"
+
+    def _edit_argv(self, cfg, out_path):
+        seq = cfg["seq"]
+        clips = []
+        for c in seq.get("clips") or []:
+            ap = os.path.realpath(os.path.join(self.out_root, c["rel"]))
+            clips.append({"path": ap, "trans": c.get("trans")})
+        rseq = {"fps": FPS, "aspect": aspect_ratio(seq.get("aspect")),
+                "fade_in": seq.get("fade_in") or 0.0,
+                "fade_out": seq.get("fade_out") or 0.0, "clips": clips}
+        sp = os.path.join(self._job_dir(cfg["tag"]), "edit_seq.json")
+        os.makedirs(os.path.dirname(sp), exist_ok=True)
+        with open(sp, "w", encoding="utf-8") as f:
+            json.dump(rseq, f, ensure_ascii=False)
+        driver = os.path.join(self.root, "scripts", "minimax_h3_edit.py")
+        return [sys.executable, driver, "--seq", sp, "--out", out_path]
+
+    def _edit_total_frames(self, job):
+        try:
+            with open(job["log"], encoding="utf-8", errors="replace") as f:
+                m = None
+                for m in re.finditer(r"total_frames=(\d+)", f.read()):
+                    pass
+            return int(m.group(1)) if m else None
+        except OSError:
+            return None
+
+    def _stage_edit(self, job):
+        try:
+            with open(job["log"], "rb") as f:
+                text = f.read().decode("utf-8", "replace")
+        except Exception:
+            text = ""
+        label, prog = None, None
+        for line in text.splitlines():
+            if line.startswith("[edit] stage "):
+                label = line[len("[edit] stage "):].strip()
+            elif line.startswith("[edit] "):
+                m = re.match(r"\[edit\] (\d+)/(\d+)", line)
+                if m:
+                    prog = (int(m.group(1)), int(m.group(2)))
+        if label:
+            job["st"]["stage"] = {"label": label, "key": "edit", "ts": NOW()}
+        if job["st"].get("status") == "done":
+            job["st"].pop("progress", None)
+        elif prog and prog[1] > 0 and prog[0] <= prog[1]:
+            job["st"]["progress"] = {"cur": prog[0], "total": prog[1]}
 
 
 # ------------------------------------------------------------------- handler
@@ -968,6 +1130,12 @@ def make_handler(mgr):
             elif u.path == "/api/outputs":
                 proj = parse_qs(u.query).get("project", [None])[0] or None
                 self._json(200, mgr.clips_list(proj))
+            elif u.path == "/api/sequence":
+                proj = parse_qs(u.query).get("project", [None])[0] or None
+                if not proj or proj not in mgr.projects:
+                    self._err(400, "项目不存在"); return
+                self._json(200, {"project": proj, "seq": mgr.load_sequence(proj),
+                                 "clips": mgr.clips_list(proj)["clips"]})
             elif u.path.startswith("/media/"):
                 jid, _, fn = u.path[len("/media/"):].partition("/")
                 if not jid or not fn or jid not in mgr.jobs:
@@ -1018,6 +1186,27 @@ def make_handler(mgr):
                     self._json(200 if ok else 400, {"ok": ok, "msg": msg}); return
                 ok, msg = mgr.delete_project(pid, js.get("mode") or "detach")
                 self._json(200 if ok else 409, {"ok": ok, "msg": msg}); return
+            if u.path in ("/api/sequence", "/api/edit/render", "/api/edit/delete"):
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    js = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                except Exception:
+                    self._err(400, "bad json"); return
+                if u.path == "/api/edit/delete":
+                    ok, msg = mgr.delete_edit(js.get("id"))
+                    self._json(200 if ok else 409, {"ok": ok, "msg": msg}); return
+                pid = (js.get("project") or "").strip()
+                if pid not in mgr.projects:
+                    self._err(400, "项目不存在"); return
+                if u.path == "/api/sequence":
+                    saved, err = mgr.save_sequence(pid, js.get("seq") or {})
+                    if err:
+                        self._err(400, err); return
+                    self._json(200, {"ok": True, "seq": saved}); return
+                jid, err = mgr.submit_edit(pid, js.get("seq"))
+                if err:
+                    self._err(400, err); return
+                self._json(202, {"id": jid, "status": "queued"}); return
             if u.path == "/api/projects":
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
@@ -1281,6 +1470,23 @@ details.sec>summary .editbtn{margin-left:auto}
        white-space:pre-wrap;word-break:break-word;max-height:200px;overflow:auto;line-height:1.55}
 .detrow{display:flex;gap:10px;font-size:13px;padding:2px 0}
 .detrow .muted{min-width:52px}
+.timeline{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.tslot{background:#0b0e13;border:1px solid var(--line);border-radius:10px;padding:8px}
+.tslot.dragging{opacity:.45}
+.trow{display:flex;gap:10px;align-items:center}
+.trow .thumb{width:112px;flex:0 0 112px;aspect-ratio:16/9;background:#000;border-radius:8px;object-fit:cover}
+.trow .tmeta{flex:1;min-width:0;font-size:12px;color:var(--mut)}
+.trow .tmeta b{color:var(--fg);font-weight:600;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.thandle{cursor:grab;touch-action:none;user-select:none;color:var(--mut);font-size:20px;line-height:1;padding:2px 6px}
+.tacts2{display:flex;flex-direction:column;gap:4px}
+.tacts2 button{background:#20242d;border:1px solid var(--line);color:var(--fg);border-radius:6px;
+       width:30px;height:26px;font-size:12px;cursor:pointer}
+.tacts2 button.rm{color:var(--err)}
+.junc{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--mut);margin:0 0 8px}
+.junc select{width:auto;padding:4px 8px;font-size:12px}
+.junc .start{color:var(--ok)}
+.addclip{position:absolute;top:6px;right:6px;background:var(--acc);color:#fff;border:0;border-radius:6px;
+       padding:2px 8px;font-size:12px;cursor:pointer;z-index:1}
 @media(max-width:980px){.cols{grid-template-columns:1fr}}
 @media(max-width:640px){.grid3{grid-template-columns:1fr 1fr}textarea,input,select{font-size:16px}}
 </style>
@@ -1392,6 +1598,50 @@ details.sec>summary .editbtn{margin-left:auto}
   </div>
     </div>
   </div>
+  <div id="editView" style="display:none">
+    <div class="card" id="editHead"></div>
+    <div class="cols">
+      <div>
+        <div class="card">
+          <div class="cardhead">
+            <h2>时间线</h2>
+            <span class="bcbar">
+              <button class="ghost" onclick="renderEdit()">预览/导出</button>
+              <button class="ghost" onclick="saveEdit()">保存</button>
+              <button class="ghost" onclick="backToProject()">返回项目</button>
+            </span>
+          </div>
+          <div class="grid3">
+            <div><label>成片画幅</label><select id="eAspect"></select></div>
+            <div><label>片头淡入(s)</label><input id="eFadeIn" type="number" value="0" min="0" max="3" step="0.1"></div>
+            <div><label>片尾淡出(s)</label><input id="eFadeOut" type="number" value="0" min="0" max="3" step="0.1"></div>
+          </div>
+          <div class="muted" id="editMsg" style="margin-top:8px"></div>
+          <div id="timeline" class="timeline"></div>
+        </div>
+        <div class="card">
+          <div class="cardhead"><h2>添加片段</h2><span class="muted">点缩略图加入时间线</span></div>
+          <div id="pickClips" class="clips"></div>
+        </div>
+      </div>
+      <div>
+        <div class="card">
+          <h2>当前渲染</h2>
+          <div id="editCur"><div class="muted">空闲</div></div>
+          <details class="logBox" style="margin-top:12px">
+            <summary class="muted">日志</summary>
+            <pre class="log" id="editLog"></pre>
+          </details>
+        </div>
+        <div class="card">
+          <details class="sec" open>
+            <summary>成片</summary>
+            <div id="editList" class="clips"></div>
+          </details>
+        </div>
+      </div>
+    </div>
+  </div>
 </main>
 <div class="modal" id="modal" onclick="if(event.target===this)closeModal()">
   <div class="box">
@@ -1457,9 +1707,13 @@ const ASPECTS = __ASPECTS__;
 let logOffset = 0, lastJob = null, jobsById = {}, curStart = 0, curRunning = false;
 let projects = [], projNames = {}, curProject = null, projectsLoaded = false;
 let clipEdit = false, clipSel = new Set(), clipsCache = [];
+let editSeq={aspect:'0',fade_in:0,fade_out:0,clips:[]}, editAvail=[], editLast=null, editLogOff=0;
 const STATUS_CN = {queued:'排队中', running:'进行中', done:'已完成', failed:'失败', cancelled:'已取消', interrupted:'已中断'};
 const MEDIA_CN = {ref_image:'图', ref_video:'视频', ref_audio:'音频'};
-const MODE_CN = {t2v:'文生视频', ref2v:'参考生视频'};
+const MODE_CN = {t2v:'文生视频', ref2v:'参考生视频', edit:'剪辑成片'};
+const TRANS_CN = {cut:'硬切', fade:'黑场渐隐', dissolve:'交叉溶解', push:'推进/滑动'};
+const EDIT_ASPECTS = [['0','原始画幅'],['2.39','2.39:1 宽银幕'],['16:9','16:9 横屏'],
+  ['9:16','9:16 竖屏'],['1:1','1:1 方形'],['4:3','4:3 横版'],['3:4','3:4 竖版']];
 function projName(pid){ return projNames[pid] || (pid==='default'?'默认项目':(pid||'')); }
 function projSub(p){
   return [p.counts.total+' 个任务',
@@ -1493,27 +1747,34 @@ function renderProjHead(){
   const p=projects.find(x=>x.id===curProject); if(!p){ return; }
   const canEdit=(curProject!=='default');
   $('projHead').innerHTML='<div class="cardhead"><h2 style="color:var(--fg);font-size:16px">'+esc(p.name)+'</h2>'+
-    '<span class="bcbar">'+(canEdit?'<button class="ghost" onclick="renameProject()">改名</button>'+
+    '<span class="bcbar"><button class="ghost" onclick="openEdit()">剪辑</button>'+
+      (canEdit?'<button class="ghost" onclick="renameProject()">改名</button>'+
       '<button class="ghost" onclick="deleteProject()">删除</button>':'')+
       '<button class="ghost" onclick="goHome()">全部项目</button></span></div>'+
     '<div class="muted">'+projSub(p)+'</div>';
 }
 function openProject(pid){ location.hash='#/p/'+encodeURIComponent(pid); }
+function openEdit(){ if(curProject) location.hash='#/p/'+encodeURIComponent(curProject)+'/edit'; }
+function backToProject(){ if(curProject) location.hash='#/p/'+encodeURIComponent(curProject); }
 function goHome(){ location.hash='#/'; }
 function route(){
-  const m=location.hash.match(/^#\/p\/(.+)$/);
+  const m=location.hash.match(/^#\/p\/([^/]+)(\/edit)?$/);
   const pid=m?decodeURIComponent(m[1]):null;
+  const edit=!!(m&&m[2]);
   if(pid && projNames[pid]!==undefined){
     if(curProject!==pid){ curProject=pid;
       $('jobs')._sig=null; $('jobs').innerHTML='';
       $('clips')._sig=null; $('clips').innerHTML='';
       jobsById={}; clipsCache=[]; clipSel.clear(); lastJob=null; logOffset=0; $('log').textContent='';
       if(clipEdit){ clipEdit=false; $('clipBar').style.display='none'; $('clipEditBtn').textContent='编辑'; } }
-    $('homeView').style.display='none'; $('projView').style.display='';
-    renderProjHead(); refreshJobs(); refreshOutputs();
+    $('homeView').style.display='none';
+    $('projView').style.display=edit?'none':'';
+    $('editView').style.display=edit?'':'none';
+    renderProjHead();
+    if(edit){ refreshEdit(); } else { refreshJobs(); refreshOutputs(); }
   }else{
     curProject=null;
-    $('homeView').style.display=''; $('projView').style.display='none';
+    $('homeView').style.display=''; $('projView').style.display='none'; $('editView').style.display='none';
   }
 }
 window.addEventListener('hashchange',route);
@@ -1876,9 +2137,9 @@ async function refreshState(){
   $('pQ').textContent='队列 '+((s.queue||[]).length+(s.current?1:0));
   if(!curProject) return;
   let j=s.current;
-  if(j && j.project!==curProject) j=null;            // 只显示本项目任务
+  if(j && (j.project!==curProject || j.mode==='edit')) j=null;   // 只显示本项目的生成任务
   if(!j) j=(lastJob && jobsById[lastJob]) || null;
-  if(j && j.project!==curProject) j=null;
+  if(j && (j.project!==curProject || j.mode==='edit')) j=null;
   if(j){
     if(lastJob!==j.id){ lastJob=j.id; logOffset=0; $('log').textContent=''; }
     renderCurrent(j);
@@ -1911,7 +2172,7 @@ async function refreshJobs(){
   if(!curProject) return;
   const r=await api('/api/jobs?project='+encodeURIComponent(curProject)); if(!r) return;
   const box=$('jobs');
-  const jobs=r.jobs.slice(0,50);
+  const jobs=r.jobs.filter(j=>j.mode!=='edit').slice(0,50);
   const sig=jobs.map(j=>[j.id,j.status,(j.stage&&j.stage.label)||'',
     (j.progress&&j.progress.cur)||'',(j.progress&&j.progress.total)||'',
     j.duration!=null?j.duration:'',j.clip_rel||'',j.err||'',j.mode||''].join(',')).join('\n');
@@ -2029,6 +2290,186 @@ async function clipDelete(){
   refreshProjects(); refreshJobs();
 }
 
+// ---------------------------------------------------------------- timeline
+function editAspectInit(){
+  if($('eAspect').options.length) return;
+  EDIT_ASPECTS.forEach(([v,label])=>{ const o=document.createElement('option'); o.value=v; o.textContent=label; $('eAspect').appendChild(o); });
+}
+function editPick(){
+  editSeq.aspect=$('eAspect').value;
+  editSeq.fade_in=parseFloat($('eFadeIn').value)||0;
+  editSeq.fade_out=parseFloat($('eFadeOut').value)||0;
+}
+async function refreshEdit(){
+  editAspectInit();
+  if(!curProject) return;
+  const r=await api('/api/sequence?project='+encodeURIComponent(curProject)); if(!r) return;
+  editSeq=r.seq||{aspect:'0',fade_in:0,fade_out:0,clips:[]};
+  editAvail=r.clips||[];
+  const p=projects.find(x=>x.id===curProject);
+  $('editHead').innerHTML='<div class="cardhead"><h2 style="color:var(--fg);font-size:16px">剪辑 · '+esc(p?p.name:curProject)+'</h2>'+
+    '<span class="bcbar"><button class="ghost" onclick="backToProject()">返回项目</button></span></div>'+
+    '<div class="muted">拖动手柄排序；相邻片段之间可设转场</div>';
+  $('eAspect').value=editSeq.aspect||'0';
+  $('eFadeIn').value=editSeq.fade_in||0;
+  $('eFadeOut').value=editSeq.fade_out||0;
+  renderTimeline(); renderPickClips(); refreshEditJobs();
+}
+function clipLabel(rel){ return String(rel).split('/').pop(); }
+function renderTimeline(){
+  const box=$('timeline');
+  if(!editSeq.clips.length){ box.innerHTML='<div class="muted">时间线为空，从下方「添加片段」加入</div>'; return; }
+  let h='';
+  editSeq.clips.forEach((c,i)=>{
+    const t=c.trans||{type:'cut',dur:0};
+    let junc;
+    if(i===0){ junc='<div class="junc"><span class="start">起始</span></div>'; }
+    else{
+      const opts=Object.keys(TRANS_CN).map(k=>'<option value="'+k+'"'+(t.type===k?' selected':'')+'>'+TRANS_CN[k]+'</option>').join('');
+      const durs=[0.3,0.5,0.8,1.0,1.5].map(d=>'<option value="'+d+'"'+(Math.abs((t.dur||0)-d)<1e-6?' selected':'')+'>'+d+'s</option>').join('');
+      junc='<div class="junc"><span>转场</span><select onchange="setTrans('+i+',this.value)">'+opts+'</select>'+
+        (t.type==='cut'?'':'<select onchange="setDur('+i+',this.value)">'+durs+'</select>')+'</div>';
+    }
+    h+='<div class="tslot" data-i="'+i+'">'+junc+
+      '<div class="trow"><span class="thandle" onpointerdown="dragStart(event,'+i+')" title="拖动排序">\u2261</span>'+
+      '<video class="thumb" preload="metadata" muted playsinline src="/files/'+encodeURI(c.rel)+'#t=0.1"></video>'+
+      '<div class="tmeta"><b>'+esc(clipLabel(c.rel))+'</b>第 '+(i+1)+' 段 · '+esc(TRANS_CN[t.type]||t.type)+(t.type==='cut'?'':' '+t.dur+'s')+'</div>'+
+      '<div class="tacts2">'+
+        '<button onclick="moveClip('+i+',-1)" title="上移">\u25B2</button>'+
+        '<button onclick="moveClip('+i+',1)" title="下移">\u25BC</button>'+
+        '<button class="rm" onclick="removeClip('+i+')" title="移除">\u2715</button>'+
+      '</div></div></div>';
+  });
+  box.innerHTML=h;
+}
+function renderPickClips(){
+  const box=$('pickClips');
+  if(!editAvail.length){ box.innerHTML='<span class="muted">暂无可用产物</span>'; return; }
+  box.innerHTML='';
+  editAvail.forEach(c=>{
+    const d=document.createElement('div'); d.className='clip'; d.onclick=()=>addClip(c.rel);
+    d.innerHTML='<span class="addclip">+</span><video preload="metadata" muted playsinline src="/files/'+encodeURI(c.rel)+'#t=0.1"></video>'+
+      '<div class="cap">'+c.name.slice(0,20)+'<br>'+fmtSize(c.size)+'</div>';
+    box.appendChild(d);
+  });
+}
+function setTrans(i,v){
+  editPick();
+  editSeq.clips[i].trans={type:v,dur:(v==='cut'?0:((editSeq.clips[i].trans&&editSeq.clips[i].trans.dur)||0.5))};
+  renderTimeline();
+}
+function setDur(i,v){ editPick(); editSeq.clips[i].trans.dur=parseFloat(v)||0.5; renderTimeline(); }
+function addClip(rel){ editPick(); editSeq.clips.push({rel:rel,trans:{type:'cut',dur:0}}); renderTimeline(); $('editMsg').textContent='已加入，记得保存'; }
+function removeClip(i){ editPick(); editSeq.clips.splice(i,1); renderTimeline(); $('editMsg').textContent='已移除，记得保存'; }
+function moveClip(i,d){
+  editPick(); const j=i+d, a=editSeq.clips;
+  if(j<0||j>=a.length) return;
+  [a[i],a[j]]=[a[j],a[i]]; renderTimeline(); $('editMsg').textContent='顺序已改，记得保存';
+}
+let dragSlot=null;
+function dragStart(e,i){
+  if(e.button!=null && e.button!==0) return;
+  editPick();
+  const slot=e.target.closest('.tslot'); if(!slot) return;
+  dragSlot=slot; slot.classList.add('dragging');
+  const move=(ev)=>{
+    if(!dragSlot) return;
+    const el=document.elementFromPoint(ev.clientX,ev.clientY);
+    const over=el&&el.closest?el.closest('.tslot'):null;
+    if(over&&over!==dragSlot){
+      const r=over.getBoundingClientRect();
+      over.parentNode.insertBefore(dragSlot, ev.clientY> r.top+r.height/2? over.nextSibling: over);
+    }
+    ev.preventDefault();
+  };
+  const up=()=>{
+    document.removeEventListener('pointermove',move); document.removeEventListener('pointerup',up);
+    slot.classList.remove('dragging');
+    const order=[...$('timeline').querySelectorAll('.tslot')].map(x=>+x.dataset.i);
+    const before=editSeq.clips.map(c=>c.rel).join('|');
+    if(order.length===editSeq.clips.length){ const a=editSeq.clips; editSeq.clips=order.map(k=>a[k]); }
+    dragSlot=null; renderTimeline();
+    if(editSeq.clips.map(c=>c.rel).join('|')!==before) $('editMsg').textContent='顺序已改，记得保存';
+  };
+  document.addEventListener('pointermove',move,{passive:false});
+  document.addEventListener('pointerup',up);
+  e.preventDefault();
+}
+async function saveEdit(quiet){
+  editPick();
+  const r=await fetch('/api/sequence',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({project:curProject,seq:editSeq})});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){ if(!quiet) alert('保存失败：'+(j.error||r.status)); return false; }
+  editSeq=j.seq||editSeq;
+  if(!quiet) $('editMsg').textContent='已保存';
+  return true;
+}
+async function renderEdit(){
+  editPick();
+  if(!editSeq.clips.length){ alert('时间线为空'); return; }
+  const ok=await askConfirm('按当前时间线渲染成片？共 <b>'+editSeq.clips.length+'</b> 段。','预览/导出','渲染');
+  if(!ok) return;
+  if(!await saveEdit(true)){ alert('保存失败'); return; }
+  const r=await fetch('/api/edit/render',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({project:curProject})});
+  const j=await r.json().catch(()=>({}));
+  if(r.status!==202){ alert('提交失败：'+(j.error||r.status)); return; }
+  editLast=j.id; editLogOff=0; $('editLog').textContent=''; $('editMsg').textContent='渲染已提交：'+j.id;
+  refreshEditJobs();
+}
+async function refreshEditJobs(){
+  if(!curProject) return;
+  const r=await api('/api/jobs?project='+encodeURIComponent(curProject)); if(!r) return;
+  const jobs=(r.jobs||[]).filter(j=>j.mode==='edit');
+  const box=$('editList');
+  const sig=jobs.map(j=>[j.id,j.status,j.clip_rel||'',j.clip_seconds||''].join(',')).join('\n');
+  if(box._sig!==sig){
+    box._sig=sig;
+    if(!jobs.length){ box.innerHTML='<span class="muted">暂无成片</span>'; }
+    else{
+      box.innerHTML='';
+      jobs.forEach(j=>{
+        const d=document.createElement('div'); d.className='clip';
+        const cap=(j.clip_seconds?j.clip_seconds+'s · ':'')+(STATUS_CN[j.status]||j.status)+' · '+(j.created||'');
+        if(j.clip_rel){
+          d.onclick=()=>play(j.clip_rel);
+          d.innerHTML='<video preload="metadata" muted playsinline src="/files/'+encodeURI(j.clip_rel)+'#t=0.1"></video>'+
+            '<div class="cap">'+esc(j.id)+'<br>'+esc(cap)+'</div>'+
+            '<button class="addclip" style="right:auto;left:6px;background:var(--err)" onclick="event.stopPropagation();delEdit(\''+j.id+'\')">删除</button>';
+        }else{
+          d.innerHTML='<div style="aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;color:var(--mut)">'+esc(STATUS_CN[j.status]||j.status)+'</div>'+
+            '<div class="cap">'+esc(j.id)+'<br>'+esc(cap)+'</div>';
+        }
+        box.appendChild(d);
+      });
+    }
+  }
+  if(editLast){ const j=(r.jobs||[]).find(x=>x.id===editLast); if(j) renderEditCurrent(j); }
+}
+async function delEdit(id){
+  const ok=await askConfirm('删除成片 <b>'+id+'</b>？（视频文件一并删除）','删除成片','删除');
+  if(!ok) return;
+  const r=await fetch('/api/edit/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){ alert('删除失败：'+(j.error||j.msg||r.status)); return; }
+  if(editLast===id) editLast=null;
+  $('editList')._sig=null; refreshEditJobs();
+}
+function renderEditCurrent(j){
+  $('editCur').innerHTML='<div class="curState"'+(j.status==='failed'?' style="color:var(--err)"':'')+'>'+friendlyStatus(j)+'</div>'+
+    (j.status==='running'&&j.progress&&j.progress.total?'<div class="bar"><i style="width:'+Math.round(j.progress.cur/j.progress.total*100)+'%"></i></div>':'')+
+    '<div class="curMeta"><b>'+j.id+'</b>'+(j.clip_rel?'<br><button class="ghost" onclick="play(\''+j.clip_rel+'\')">播放成片</button>':'')+'</div>';
+}
+async function editTick(){
+  if(!editLast) return;
+  const j=await api('/api/jobs/'+editLast); if(!j) return;
+  renderEditCurrent(j);
+  const r=await api('/api/jobs/'+editLast+'/log?offset='+editLogOff);
+  if(r){ if(r.text){ $('editLog').textContent+=r.text; $('editLog').scrollTop=$('editLog').scrollHeight; } editLogOff=r.offset; }
+  if(j.status!=='running'&&j.status!=='queued'){ editLast=null; $('editList')._sig=null; refreshEditJobs(); refreshProjects(); }
+}
+
 function play(rel){ $('mvideo').src='/files/'+encodeURI(rel); $('mcap').textContent=rel;
   $('modal').classList.add('open'); $('mvideo').play().catch(()=>{}); }
 function closeModal(){ $('mvideo').pause(); $('mvideo').src=''; $('modal').classList.remove('open'); }
@@ -2076,6 +2517,7 @@ onModeChange();
 refreshState();
 setInterval(refreshState,2000); setInterval(refreshProjects,5000);
 setInterval(refreshJobs,5000); setInterval(refreshOutputs,5000); setInterval(pollLog,1500);
+setInterval(()=>{ const v=$('editView'); if(v && v.style.display!=='none') editTick(); },1500);
 </script>
 </body>
 </html>"""
