@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""ref2v_web.py -- LAN web console for single-segment reference-to-video.
+"""minimax_h3_web.py -- LAN web console for single-segment MiniMax H3 video.
 
 Stdlib only (http.server); it never imports numpy/av/safetensors. A job is one
-prompt + reference images/videos/audios; the worker spawns ref2v_runner.py, which
-drives ComfyUI (:8188, resident int4 CLIP + ref2va int8 UNet) and drops one mp4
-under output/ref2v/. Jobs run serially -- the GPUs render one clip at a time.
+prompt plus either reference images/videos/audios (ref2v) or optional first/last
+keyframes (t2v); the worker spawns minimax_h3_runner.py, which drives ComfyUI
+(:8188, resident int4 CLIP + int8 UNet) and drops one mp4 under
+output/{ref2v,t2v}/. Jobs run serially -- the GPUs render one clip at a time.
 
 Usage:
-  ~/ComfyUI-Deploy/comfyenv/bin/python scripts/ref2v_web.py --start|--stop|--status
-Default: http://0.0.0.0:8191/   data: <root>/.h3ref2v/   log: <root>/ref2v_web.log
+  ~/ComfyUI-Deploy/comfyenv/bin/python scripts/minimax_h3_web.py --start|--stop|--status
+Default: http://0.0.0.0:8191/   data: <root>/.h3ref2v/   log: <root>/minimax_h3_web.log
 """
 import argparse, base64, glob, json, mimetypes, os, random, re, shutil, signal
 import subprocess, sys, threading, time, uuid, urllib.request, urllib.error
@@ -264,20 +265,33 @@ _STAGE_PATTERNS = [
     (r"\[resident\] reusing service", "复用常驻服务(免冷启动)"),
     (r"\[lifecycle\] starting", "启动 ComfyUI(冷启动)"),
     (r"service up after", "服务就绪"),
-    (r"\[stage\] material", "预处理素材"),
-    (r"\[stage\] queue", "已提交,等待采样"),
-    (r"\[stage\] sampling", "采样生成中"),
-    (r"\[stage\] done", "完成,正在收尾"),
     (r"NODE ERROR", "节点出错"),
     (r"submit error", "提交错误"),
 ]
+# runner-emitted "[stage] <key>" -> friendly, detailed console text
+_STAGE_LABELS = {
+    "material": "预处理素材(上传/转码)",
+    "queue": "已提交,等待执行",
+    "sampling": "采样生成中",
+    "done": "生成完成,正在收尾",
+    "ray_rebuild": "重建 Ray 工作进程(冷加载/换 UNet)",
+    "load_unet": "加载 UNet(FSDP 分片)",
+    "load_clip": "加载 CLIP 文本编码器",
+    "encode_clip": "CLIP 编码(提示词/参考)",
+    "load_vae": "加载/解码 VAE",
+}
+_STAGE_LINE_RE = re.compile(r"^\[stage\]\s*(\S+)")
 _PROG_RE = re.compile(r"\[progress\]\s+(\d+)/(\d+)")
 
 
 def stage_from_log(text):
     lines = [l for l in text.splitlines()
              if l.strip() and "[progress]" not in l
-             and not l.startswith(("cmd:", "=== job", "[web]"))]
+             and not l.startswith(("cmd:", "=== job", "[web]", "[comfy]"))]
+    for l in reversed(lines):
+        m = _STAGE_LINE_RE.match(l)
+        if m:
+            return _STAGE_LABELS.get(m.group(1), m.group(1))[:80]
     for pat, lab in reversed(_STAGE_PATTERNS):
         for l in reversed(lines):
             if re.search(pat, l):
@@ -413,6 +427,12 @@ class Manager:
         except Exception:
             text = ""
         job["st"]["stage"] = {"label": stage_from_log(text), "ts": NOW()}
+        detail = None
+        for l in text.splitlines():
+            if l.startswith("[comfy] "):
+                detail = l[len("[comfy] "):].strip()
+        if detail:
+            job["st"]["detail"] = detail[:160]
         m = None
         for m in _PROG_RE.finditer(text):
             pass
@@ -563,6 +583,7 @@ class Manager:
                 "mode": st.get("mode") or (job.get("cfg") or {}).get("mode") or "ref2v",
                 "ended": st.get("ended"), "duration": st.get("duration"),
                 "stage": st.get("stage"), "progress": st.get("progress"),
+                "detail": st.get("detail"),
                 "err": st.get("err"), "seed": st.get("seed"),
                 "params": st.get("params"), "media": st.get("media"),
                 "clip_rel": st.get("clip_rel"), "clip_size": st.get("clip_size"),
@@ -1097,6 +1118,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 </div>
 <script>
 const $ = (id)=>document.getElementById(id);
+const esc = (s)=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ASPECTS = __ASPECTS__;
 let logOffset = 0, lastJob = null, jobsById = {}, curStart = 0, curRunning = false;
 const STATUS_CN = {queued:'排队中', running:'进行中', done:'已完成', failed:'失败', cancelled:'已取消', interrupted:'已中断'};
@@ -1133,6 +1155,9 @@ function fmtDur(sec){ sec=Math.max(0,Math.floor(sec)); return String(Math.floor(
 function renderCurrent(j){
   curStart = j.created_ts || curStart || 0;
   curRunning = (j.status==='running'||j.status==='queued');
+  const sig=[j.id,j.status,friendlyStatus(j),j.mode||'',j.clip_rel||'',j.err||'',j.detail||'',mediaBrief(j.media)].join('|');
+  if($('cur')._sig===sig) return;
+  $('cur')._sig=sig;
   const p=j.params||{};
   const meta=[MODE_CN[j.mode]||'', mediaBrief(j.media), p.dur?p.dur+'s':'', p.aspect?p.aspect.split(' ')[0]:'',
               p.megapixels?p.megapixels+'MP':'', p.steps?p.steps+'步':'', j.seed?('seed '+j.seed):''].filter(Boolean).join(' · ');
@@ -1143,8 +1168,9 @@ function renderCurrent(j){
     bar='<div class="bar indet"><i></i></div>';
   }
   const cls=(j.status==='failed')?' style="color:var(--err)"':'';
+  const detail=(curRunning&&j.detail)? '<span class="muted">'+esc(j.detail)+'</span>' : '';
   $('cur').innerHTML='<div class="curState"'+cls+'>'+friendlyStatus(j)+'</div>'+bar+
-    '<div class="curMeta"><b>'+j.id+'</b>'+(meta?'<br>'+meta:'')+
+    '<div class="curMeta"><b>'+j.id+'</b>'+(meta?'<br>'+meta:'')+(detail?'<br>'+detail:'')+
     (curRunning&&curStart?'<br>已用时 <span id="curElapsed">'+fmtDur(Date.now()/1000-curStart)+'</span>':'')+
     (j.status==='done'&&j.clip_rel?'<br><button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看产物</button>':'')+'</div>';
 }
@@ -1287,18 +1313,33 @@ async function pollLog(){
   logOffset=r.offset;
 }
 
+function updateUsedElapsed(){
+  const now=Date.now()/1000;
+  document.querySelectorAll('#jobs [data-used]').forEach(el=>{
+    const ts=parseFloat(el.getAttribute('data-used'));
+    if(ts) el.textContent='用时 '+fmtDur(now-ts);
+  });
+}
+
 async function refreshJobs(){
   const r=await api('/api/jobs'); if(!r) return;
   const box=$('jobs');
-  if(!r.jobs.length){ box.innerHTML='<span class="muted">暂无</span>'; return; }
+  const jobs=r.jobs.slice(0,50);
+  const sig=jobs.map(j=>[j.id,j.status,(j.stage&&j.stage.label)||'',
+    (j.progress&&j.progress.cur)||'',(j.progress&&j.progress.total)||'',
+    j.duration!=null?j.duration:'',j.clip_rel||'',j.err||'',j.mode||''].join(',')).join('\n');
+  if(box._sig===sig){ updateUsedElapsed(); return; }
+  box._sig=sig;
+  if(!jobs.length){ box.innerHTML='<span class="muted">暂无</span>'; return; }
   box.innerHTML='';
-  r.jobs.slice(0,50).forEach(j=>{
+  jobs.forEach(j=>{
     jobsById[j.id]=j;
     const d=document.createElement('div'); d.className='job';
     const p=j.params||{};
     const info=[mediaBrief(j.media), p.dur?p.dur+'s':'', p.megapixels?p.megapixels+'MP':''].filter(Boolean).join(' · ');
     const used = (j.duration!=null)? j.duration : (j.created_ts? Math.max(0, Date.now()/1000-j.created_ts) : null);
-    const usedTxt = (used!=null)? ('用时 '+fmtDur(used)) : '';
+    const usedTxt = (used!=null)? (j.duration!=null? '用时 '+fmtDur(used)
+                                 : '<span data-used="'+j.created_ts+'">用时 '+fmtDur(used)+'</span>') : '';
     const line2 = [MODE_CN[j.mode]||'', info, usedTxt].filter(Boolean).join(' · ');
     const note = j.status==='failed'? '<span style="color:var(--err)">'+friendlyErr(j.err)+'</span>' : (j.stage&&j.status==='running'? j.stage.label : '');
     let acts='';
@@ -1317,6 +1358,9 @@ function jobAct(id,act){ if(!confirm(act==='cancel'?'取消任务 '+id+'?':'删�
 async function refreshOutputs(){
   const r=await api('/api/outputs'); if(!r) return;
   const box=$('clips');
+  const sig=r.clips.map(c=>c.rel+'|'+c.size).join('\n');
+  if(box._sig===sig) return;
+  box._sig=sig;
   if(!r.clips.length){ box.innerHTML='<span class="muted">暂无产物</span>'; return; }
   box.innerHTML='';
   r.clips.forEach(c=>{
@@ -1377,7 +1421,7 @@ setInterval(refreshState,2000); setInterval(refreshJobs,5000); setInterval(refre
 
 # --------------------------------------------------------------------- main
 def main():
-    ap = argparse.ArgumentParser(description="LAN web console for ref2v_runner.py")
+    ap = argparse.ArgumentParser(description="LAN web console for minimax_h3_runner.py")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--root", default=None)
@@ -1392,11 +1436,11 @@ def main():
 
     root = os.path.abspath(a.root or os.path.expanduser("~/MiniMax-H3-Deploy"))
     driver = os.path.abspath(a.driver or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "ref2v_runner.py"))
+        os.path.dirname(os.path.abspath(__file__)), "minimax_h3_runner.py"))
     data = os.path.join(root, ".h3ref2v")
     os.makedirs(data, exist_ok=True)
-    pidfile = os.path.join(data, "ref2v_web.pid")
-    logfile = os.path.join(root, "ref2v_web.log")
+    pidfile = os.path.join(data, "minimax_h3_web.pid")
+    logfile = os.path.join(root, "minimax_h3_web.log")
 
     def read_pid():
         try:

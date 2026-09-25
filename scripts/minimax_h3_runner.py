@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""ref2v_runner.py -- one reference-to-video clip per invocation.
+"""minimax_h3_runner.py -- one MiniMax H3 clip per invocation.
 
 Single-segment sibling of chain_director_v3.py: same resident int4-CLIP /
-int8-UNet raylight base, but node 133 is MiniMaxH3ReferenceToVideo and the
-clip is produced from a prompt plus reference images / videos / audios.  No
-slots, no continuation, no merge -- one task in, one mp4 out.
+int8-UNet raylight base.  Two modes:
+  --mode ref2v : node 133 is MiniMaxH3ReferenceToVideo; clip from a prompt plus
+                 reference images / videos / audios.
+  --mode t2v   : node 133 is MiniMaxH3ImageToVideo (fl2va UNet); prompt plus
+                 optional first/last keyframes (none = t2v, first = i2v,
+                 both = fl2v).
+No slots, no continuation, no merge -- one task in, one mp4 out.
 
 ComfyUI is resident: a run starts the service only when it is down, and always
 leaves it up so the next run reuses the loaded FSDP shards and raylight workers.
 The web console owns the explicit "release VRAM" action.
 
 Usage (called by the web console; can be run by hand too):
-  ~/ComfyUI-Deploy/comfyenv/bin/python scripts/ref2v_runner.py \
-    --prompt "..." --image ref.png --dur 5 --steps 20 \
+  ~/ComfyUI-Deploy/comfyenv/bin/python scripts/minimax_h3_runner.py \
+    --mode ref2v --prompt "..." --image ref.png --dur 5 --steps 20 \
     --out ~/MiniMax-H3-Deploy/output/ref2v/<job>.mp4
 """
 import argparse, glob, json, os, random, re, shutil, signal, subprocess, sys, time, urllib.request
@@ -335,12 +339,45 @@ def submit(g, client):
     return r["prompt_id"]
 
 
-def running_prompts():
-    try:
-        q = http_json(API + "/queue", timeout=5)
-    except Exception:
-        return set()
-    return {it[1] for it in (q.get("queue_running") or [])}
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# (pattern, stage key) -- first match wins, checked in order.
+_COMFY_STAGE_RE = (
+    (re.compile(r"reuse path exception -> REBUILD|skip reuse .*-> REBUILD|doing ray\.shutdown"), "ray_rebuild"),
+    (re.compile(r"Applying FSDP to \w*MiniMaxH3Model"), "load_unet"),
+    (re.compile(r"Requested to load MiniMaxH3TEModel_"), "load_clip"),
+    (re.compile(r"H3 Qwen model-parallel timing"), "encode_clip"),
+    (re.compile(r"Requested to load MiniMaxH3VideoVAE|Requested to load MiniMaxH3AudioVAE"), "load_vae"),
+)
+# Lines worth echoing to the job log so the console's diagnostic pane shows the
+# model-load / ray / encode detail that otherwise only lives in comfy.log.
+_COMFY_DETAIL_RE = re.compile(
+    r"H3 Qwen model-parallel (timing|placement)|Applying FSDP|\[GUARD\]|"
+    r"Requested to load|loaded partially|Parallel Degree|USP\] Initializing|"
+    r"Using XFuser|NCCL version|COMM test passed|FSDP registered|Prompt executed in|VRAM\[")
+
+
+def _clean_comfy_line(line):
+    line = _ANSI_RE.sub("", line)
+    m = re.search(r"\((?:RayWorker|pid=\d+)[^)]*\)\s*(.*)", line)
+    if m:
+        line = m.group(1)
+    return line.strip()
+
+
+def comfy_events(chunk):
+    """Yield ("stage", key) / ("detail", text) events from a chunk of comfy.log."""
+    for raw in chunk.decode("utf-8", "replace").splitlines():
+        if "|" in raw and "%|" in raw:      # tqdm progress bars
+            continue
+        line = _clean_comfy_line(raw)
+        if not line:
+            continue
+        for rx, key in _COMFY_STAGE_RE:
+            if rx.search(line):
+                yield ("stage", key)
+                break
+        if _COMFY_DETAIL_RE.search(line):
+            yield ("detail", line[:300])
 
 
 def sample_progress(start=0):
@@ -369,6 +406,8 @@ def wait_done(pid, timeout_s=9000):
     announced = False
     prog_off = 0
     last_prog = None
+    last_stage = None
+    comfy_off = os.path.getsize(COMFY_LOG) if os.path.exists(COMFY_LOG) else 0
     while time.time() - t0 < timeout_s:
         if _cancel["hit"]:
             sys.exit("cancelled")
@@ -387,13 +426,33 @@ def wait_done(pid, timeout_s=9000):
                             str(m.get("exception_message"))[-8000:]))
                 sys.exit(1)
             return h[pid], time.time() - t0
-        if not announced and pid in running_prompts():
-            announced = True
-            prog_off = os.path.getsize(COMFY_LOG) if os.path.exists(COMFY_LOG) else 0
-            log("[stage] sampling")
-        if announced:
-            pr = sample_progress(prog_off)
-            if pr and pr != last_prog:
+        # surface ComfyUI-side phases (model loads, ray rebuild, encode)
+        try:
+            with open(COMFY_LOG, "rb") as f:
+                f.seek(comfy_off)
+                chunk = f.read()
+                comfy_off = f.tell()
+        except Exception:
+            chunk = b""
+        for kind, payload in comfy_events(chunk):
+            if kind == "stage":
+                if payload != last_stage:
+                    last_stage = payload
+                    log("[stage] %s" % payload)
+            else:
+                log("[comfy] %s" % payload)
+        pr = sample_progress(prog_off)
+        if pr and pr != last_prog:
+            if not announced:
+                # the tail may still hold the previous run's final 'N/N' bar;
+                # only a genuine first bar (or a 1-step run) starts sampling
+                if pr[0] == pr[1] and pr[1] != 1:
+                    pr = None
+                else:
+                    announced = True
+                    prog_off = os.path.getsize(COMFY_LOG) if os.path.exists(COMFY_LOG) else 0
+                    log("[stage] sampling")
+            if pr is not None:
                 last_prog = pr
                 log("[progress] %d/%d" % pr)
         time.sleep(3)
