@@ -34,10 +34,12 @@ CLIP = "qwen3vl_32b_minimax_h3_int4_convrot.safetensors"
 VAE_VIDEO = "minimax_h3_video_vae_int8_convrot.safetensors"
 VAE_AUDIO = "minimax_h3_audio_vae_fp32.safetensors"
 UNET_REF2VA = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+UNET_FL2VA = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
 AUDIO_VAE_DEVICE = "gpu:1"
 FPS = 24
 MAX_IMAGES, MAX_VIDEOS, MAX_AUDIOS = 9, 3, 3
-OUT_SUBDIR = "ref2v"
+OUT_SUBDIRS = {"ref2v": "ref2v", "t2v": "t2v"}
+MODE_UNET = {"ref2v": UNET_REF2VA, "t2v": UNET_FL2VA}
 
 
 def http_json(url, data=None, timeout=120):
@@ -153,7 +155,7 @@ def ref2v_length(dur):
 
 
 # ------------------------------------------------------------------- graph
-def ray_base(save_prefix, steps, epoch):
+def ray_base(save_prefix, steps, epoch, unet=UNET_REF2VA):
     return {
         "141": {"class_type": "RayInitializer", "inputs": {
             "ray_cluster_address": "local", "ray_cluster_namespace": "default",
@@ -169,7 +171,7 @@ def ray_base(save_prefix, steps, epoch):
         "902": {"class_type": "SelectVAEDevice", "inputs": {
             "vae": ["122", 0], "device": AUDIO_VAE_DEVICE}},
         "142": {"class_type": "RayUNETLoader", "inputs": {
-            "unet_name": UNET_REF2VA, "weight_dtype": "default",
+            "unet_name": unet, "weight_dtype": "default",
             "ray_actors_init": ["141", 0]}},
         "125": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
         "145": {"class_type": "RayBasicGuider", "inputs": {
@@ -196,7 +198,7 @@ def ray_base(save_prefix, steps, epoch):
 def ref2v_graph(prompt, w, h, dur, seed, tag, steps, epoch,
                 images, videos, audios, ref_image_size="match",
                 aspect="16:9 (Widescreen)", megapixels=0.4, multiple=32):
-    g = ray_base("video/%s/%s" % (OUT_SUBDIR, tag), steps, epoch)
+    g = ray_base("video/%s/%s" % (OUT_SUBDIRS["ref2v"], tag), steps, epoch)
     g["144"]["inputs"]["noise_seed"] = seed
     g["133"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
         "clip": ["904", 0], "vae": ["121", 0], "audio_vae": ["122", 0],
@@ -232,6 +234,32 @@ def ref2v_graph(prompt, w, h, dur, seed, tag, steps, epoch,
     return g
 
 
+def t2v_graph(prompt, w, h, dur, seed, tag, steps, epoch,
+              first_frame=None, last_frame=None,
+              aspect="16:9 (Widescreen)", megapixels=0.4, multiple=32):
+    """t2v / i2v / fl2v: prompt plus optional first and/or last keyframe."""
+    g = ray_base("video/%s/%s" % (OUT_SUBDIRS["t2v"], tag), steps, epoch, unet=UNET_FL2VA)
+    g["144"]["inputs"]["noise_seed"] = seed
+    g["133"] = {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
+        "clip": ["904", 0], "vae": ["121", 0], "prompt": prompt,
+        "length": ref2v_length(dur)}}
+    if w and h:
+        g["133"]["inputs"]["width"] = w
+        g["133"]["inputs"]["height"] = h
+    else:
+        g["115"] = {"class_type": "ResolutionSelector", "inputs": {
+            "aspect_ratio": aspect, "megapixels": megapixels, "multiple": multiple}}
+        g["133"]["inputs"]["width"] = ["115", 0]
+        g["133"]["inputs"]["height"] = ["115", 1]
+    for key, src, idx in (("first_frame", first_frame, 400), ("last_frame", last_frame, 401)):
+        if src:
+            fname = _stage_image(src, tag, idx)
+            nid = str(idx)
+            g[nid] = {"class_type": "LoadImage", "inputs": {"image": fname}}
+            g["133"]["inputs"][key] = [nid, 0]
+    return g
+
+
 # ----------------------------------------------------------------- service
 def service_pid():
     out = subprocess.run(["pgrep", "-f", "main.py --listen 0.0.0.0 --port 8188"],
@@ -255,18 +283,19 @@ def _state_read():
         return {}
 
 
-def _state_write(epoch):
+def _state_write(epoch, unet):
     with open(STATE_PATH, "w") as fh:
-        json.dump({"pid": service_pid(), "epoch": int(epoch), "unet": UNET_REF2VA}, fh)
+        json.dump({"pid": service_pid(), "epoch": int(epoch), "unet": unet}, fh)
 
 
-def ensure_service():
+def ensure_service(unet=UNET_REF2VA):
     """Return the reuse_epoch. Resumes the running service and its loaded FSDP
     UNet when the state file vouches for it; otherwise starts the service and
-    mints a new epoch (ray rebuild + UNet reload on the first prompt)."""
+    mints a new epoch (ray rebuild + UNet reload on the first prompt). A mode
+    switch changes the UNet and therefore always mints a fresh epoch."""
     pid = service_pid()
     st = _state_read()
-    if pid and st.get("pid") == pid and st.get("unet") == UNET_REF2VA and st.get("epoch") and _service_up():
+    if pid and st.get("pid") == pid and st.get("unet") == unet and st.get("epoch") and _service_up():
         log("[resident] reusing service pid=%s (epoch=%s)" % (pid, st["epoch"]))
         return int(st["epoch"])
     if not _service_up():
@@ -281,7 +310,7 @@ def ensure_service():
         else:
             sys.exit("service did not come up")
     epoch = int(time.time_ns())
-    _state_write(epoch)
+    _state_write(epoch, unet)
     return epoch
 
 
@@ -314,16 +343,17 @@ def running_prompts():
     return {it[1] for it in (q.get("queue_running") or [])}
 
 
-def sample_progress():
+def sample_progress(start=0):
     """Latest 'done/total' step from ComfyUI's tqdm line in comfy.log (or None).
 
     Serial execution means at most one prompt is sampling, so the tail of the
-    shared server log is ours to read."""
+    shared server log is ours to read. Only lines written after `start` (the
+    byte offset captured when this prompt started sampling) count, so the
+    previous run's last tqdm line is not mistaken for ours."""
     try:
         with open(COMFY_LOG, "rb") as f:
-            f.seek(0, 2)
-            start = max(0, f.tell() - 16384)
-            f.seek(start)
+            size = f.seek(0, 2)
+            f.seek(max(start, size - 16384))
             tail = f.read().decode("utf-8", "replace")
     except Exception:
         return None
@@ -337,6 +367,7 @@ def sample_progress():
 def wait_done(pid, timeout_s=9000):
     t0 = time.time()
     announced = False
+    prog_off = 0
     last_prog = None
     while time.time() - t0 < timeout_s:
         if _cancel["hit"]:
@@ -358,9 +389,10 @@ def wait_done(pid, timeout_s=9000):
             return h[pid], time.time() - t0
         if not announced and pid in running_prompts():
             announced = True
+            prog_off = os.path.getsize(COMFY_LOG) if os.path.exists(COMFY_LOG) else 0
             log("[stage] sampling")
         if announced:
-            pr = sample_progress()
+            pr = sample_progress(prog_off)
             if pr and pr != last_prog:
                 last_prog = pr
                 log("[progress] %d/%d" % pr)
@@ -395,35 +427,49 @@ def main():
     ap.add_argument("--multiple", type=int, default=32)
     ap.add_argument("--steps", type=int, default=8)
     ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--mode", choices=("ref2v", "t2v"), default="ref2v")
+    ap.add_argument("--first-frame", default=None)
+    ap.add_argument("--last-frame", default=None)
     ap.add_argument("--ref-image-size", choices=("match", "max"), default="match")
-    ap.add_argument("--tag", default="ref2v")
-    ap.add_argument("--out", default=None, help="final mp4 path (default output/ref2v/<tag>.mp4)")
+    ap.add_argument("--tag", default="h3")
+    ap.add_argument("--out", default=None, help="final mp4 path (default output/<mode>/<tag>.mp4)")
     a = ap.parse_args()
 
-    if len(a.image) > MAX_IMAGES:
-        sys.exit("too many reference images (max %d)" % MAX_IMAGES)
-    if len(a.video) > MAX_VIDEOS:
-        sys.exit("too many reference videos (max %d)" % MAX_VIDEOS)
-    if len(a.audio) > MAX_AUDIOS:
-        sys.exit("too many reference audios (max %d)" % MAX_AUDIOS)
-    if not a.image and not a.video and not a.audio:
-        sys.exit("at least one reference image, video or audio is required")
+    if a.mode == "ref2v":
+        if len(a.image) > MAX_IMAGES:
+            sys.exit("too many reference images (max %d)" % MAX_IMAGES)
+        if len(a.video) > MAX_VIDEOS:
+            sys.exit("too many reference videos (max %d)" % MAX_VIDEOS)
+        if len(a.audio) > MAX_AUDIOS:
+            sys.exit("too many reference audios (max %d)" % MAX_AUDIOS)
+        if not a.image and not a.video and not a.audio:
+            sys.exit("at least one reference image, video or audio is required")
+    elif a.image or a.video or a.audio:
+        sys.exit("reference media is only valid in ref2v mode")
+    for p in (a.first_frame, a.last_frame):
+        if p and not os.path.isfile(p):
+            sys.exit("keyframe not found: %s" % p)
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
 
     seed = a.seed if a.seed is not None else random.randint(0, 2**63 - 1)
     log("[stage] material")
-    epoch = ensure_service()
-    client = "ref2v-" + a.tag + "-" + str(random.randint(1000, 9999))
+    epoch = ensure_service(MODE_UNET[a.mode])
+    client = "h3-" + a.tag + "-" + str(random.randint(1000, 9999))
     canvas = ("%dx%d" % (a.width, a.height)) if (a.width and a.height) \
         else "%s @ %.2fMP (x%d)" % (a.aspect, a.megapixels, a.multiple)
-    log("seed %d | length %d | %s | steps %d"
-        % (seed, ref2v_length(a.dur), canvas, a.steps))
+    log("mode %s | seed %d | length %d | %s | steps %d"
+        % (a.mode, seed, ref2v_length(a.dur), canvas, a.steps))
 
-    g = ref2v_graph(a.prompt, a.width, a.height, a.dur, seed, a.tag, a.steps, epoch,
-                    a.image, a.video, a.audio, a.ref_image_size,
-                    a.aspect, a.megapixels, a.multiple)
+    if a.mode == "ref2v":
+        g = ref2v_graph(a.prompt, a.width, a.height, a.dur, seed, a.tag, a.steps, epoch,
+                        a.image, a.video, a.audio, a.ref_image_size,
+                        a.aspect, a.megapixels, a.multiple)
+    else:
+        g = t2v_graph(a.prompt, a.width, a.height, a.dur, seed, a.tag, a.steps, epoch,
+                      a.first_frame, a.last_frame,
+                      a.aspect, a.megapixels, a.multiple)
     log("[stage] queue")
     pid = submit(g, client)
     log("prompt_id %s" % pid)
@@ -431,7 +477,7 @@ def main():
     mp4 = saved_mp4(hist)
     if mp4 is None:
         sys.exit("no mp4 saved")
-    out = a.out or os.path.join(OUTPUT, OUT_SUBDIR, "%s.mp4" % a.tag)
+    out = a.out or os.path.join(OUTPUT, OUT_SUBDIRS[a.mode], "%s.mp4" % a.tag)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     if os.path.abspath(mp4) != os.path.abspath(out):
         shutil.move(mp4, out)

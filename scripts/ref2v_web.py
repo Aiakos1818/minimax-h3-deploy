@@ -23,6 +23,9 @@ BUSY_WAIT_MAX_S = 6 * 3600
 FPS = 24
 MAX_IMAGES, MAX_VIDEOS, MAX_AUDIOS = 9, 3, 3
 MEDIA_KINDS = ("ref_image", "ref_video", "ref_audio")
+FRAME_KINDS = ("first_frame", "last_frame")
+MODES = ("t2v", "ref2v")
+OUT_SUBDIRS = {"t2v": "t2v", "ref2v": "ref2v"}
 ASPECTS = ["16:9 (Widescreen)", "9:16 (Portrait Widescreen)", "1:1 (Square)",
            "4:3 (Standard)", "3:4 (Portrait Standard)", "3:2 (Photo)",
            "2:3 (Portrait Photo)", "21:9 (Ultrawide)"]
@@ -272,12 +275,14 @@ _PROG_RE = re.compile(r"\[progress\]\s+(\d+)/(\d+)")
 
 
 def stage_from_log(text):
-    lines = [l for l in text.splitlines() if l.strip() and "[progress]" not in l]
+    lines = [l for l in text.splitlines()
+             if l.strip() and "[progress]" not in l
+             and not l.startswith(("cmd:", "=== job", "[web]"))]
     for pat, lab in reversed(_STAGE_PATTERNS):
         for l in reversed(lines):
             if re.search(pat, l):
                 return lab
-    return lines[-1][:80] if lines else "排队中..."
+    return lines[-1][:80] if lines else "启动生成进程..."
 
 
 # -------------------------------------------------------------- job manager
@@ -288,7 +293,7 @@ class Manager:
         self.password = password
         self.data = os.path.join(root, ".h3ref2v")
         self.jobs_dir = os.path.join(self.data, "jobs")
-        self.out_dir = os.path.join(root, "output", "ref2v")
+        self.out_root = os.path.join(root, "output")
         self.lock = threading.RLock()
         self._stop = False
         self.jobs = {}
@@ -298,7 +303,11 @@ class Manager:
         self.comfy = ComfyHealth(comfy_base)
         self._cv = threading.Condition(self.lock)
         os.makedirs(self.jobs_dir, exist_ok=True)
-        os.makedirs(self.out_dir, exist_ok=True)
+        for sub in OUT_SUBDIRS.values():
+            os.makedirs(os.path.join(self.out_root, sub), exist_ok=True)
+
+    def _out_dir(self, mode):
+        return os.path.join(self.out_root, OUT_SUBDIRS.get(mode, "ref2v"))
 
     # ---- persistence ----
     def _job_dir(self, jid):
@@ -347,6 +356,7 @@ class Manager:
             job = {"id": jid, "cfg": cfg, "log": os.path.join(self._job_dir(jid), "log.txt"),
                    "st": {"id": jid, "status": "queued", "created": NOW(),
                           "created_ts": time.time(), "tag": jid, "stage": None,
+                          "mode": cfg.get("mode", "ref2v"),
                           "params": cfg["params"], "seed": cfg["seed"],
                           "media": cfg["media"]},
                    "child": None}
@@ -419,20 +429,27 @@ class Manager:
 
     def _build_argv(self, cfg):
         p = cfg["params"]
-        a = [sys.executable, self.driver, "--tag", cfg["tag"], "--prompt", p["prompt"],
+        mode = cfg.get("mode", "ref2v")
+        a = [sys.executable, self.driver, "--mode", mode, "--tag", cfg["tag"],
+             "--prompt", p["prompt"],
              "--dur", str(p["dur"]), "--aspect", p["aspect"],
              "--megapixels", str(p["megapixels"]), "--multiple", str(p["multiple"]),
              "--steps", str(p["steps"]), "--ref-image-size", p["ref_image_size"],
-             "--out", os.path.join(self.out_dir, "%s.mp4" % cfg["tag"])]
+             "--out", os.path.join(self._out_dir(mode), "%s.mp4" % cfg["tag"])]
         if cfg.get("seed") is not None:
             a += ["--seed", str(cfg["seed"])]
         m = cfg["media"]
-        for f in m.get("ref_image", []):
-            a += ["--image", f]
-        for f in m.get("ref_video", []):
-            a += ["--video", f]
-        for f in m.get("ref_audio", []):
-            a += ["--audio", f]
+        if mode == "ref2v":
+            for f in m.get("ref_image", []):
+                a += ["--image", f]
+            for f in m.get("ref_video", []):
+                a += ["--video", f]
+            for f in m.get("ref_audio", []):
+                a += ["--audio", f]
+        else:
+            for kind, flag in (("first_frame", "--first-frame"), ("last_frame", "--last-frame")):
+                for f in m.get(kind, []):
+                    a += [flag, f]
         return a
 
     def _run(self, jid):
@@ -483,8 +500,9 @@ class Manager:
                           err="已取消")
                 log.write("\n[web] cancelled rc=%s\n" % rc)
             elif rc == 0:
-                rel = "ref2v/%s.mp4" % cfg["tag"]
-                p = os.path.join(self.root, "output", rel)
+                mode = cfg.get("mode", "ref2v")
+                rel = "%s/%s.mp4" % (OUT_SUBDIRS.get(mode, "ref2v"), cfg["tag"])
+                p = os.path.join(self.out_root, rel)
                 size = os.path.getsize(p) if os.path.isfile(p) else 0
                 frames = ref2v_length(cfg["params"]["dur"])
                 self._set(jid, "status", "done", ended=NOW(), exit=0, err=None,
@@ -542,6 +560,7 @@ class Manager:
         st = job["st"]
         return {"id": st["id"], "status": st.get("status"), "created": st.get("created"),
                 "created_ts": st.get("created_ts"),
+                "mode": st.get("mode") or (job.get("cfg") or {}).get("mode") or "ref2v",
                 "ended": st.get("ended"), "duration": st.get("duration"),
                 "stage": st.get("stage"), "progress": st.get("progress"),
                 "err": st.get("err"), "seed": st.get("seed"),
@@ -566,15 +585,17 @@ class Manager:
         return lst
 
     def clips_list(self):
-        out_root = os.path.join(self.root, "output")
+        out_root = self.out_root
         clips = []
         meta = {}
         for job in self.jobs.values():
             rel = job["st"].get("clip_rel")
             if rel:
                 meta[os.path.basename(rel)] = self.info(job)
-        for p in sorted(glob.glob(os.path.join(self.out_dir, "*.mp4")),
-                        key=os.path.getmtime, reverse=True):
+        paths = []
+        for sub in OUT_SUBDIRS.values():
+            paths += glob.glob(os.path.join(out_root, sub, "*.mp4"))
+        for p in sorted(paths, key=os.path.getmtime, reverse=True):
             rel = os.path.relpath(p, out_root).replace("\\", "/")
             m = meta.get(os.path.basename(p), {})
             clips.append({"rel": rel, "name": os.path.basename(p),
@@ -817,24 +838,36 @@ def make_handler(mgr):
             prompt = (_first(fields, "prompt", "") or "").strip()
             if not prompt:
                 self._err(400, "请填写提示词"); return
+            mode = _first(fields, "mode", "ref2v")
+            if mode not in MODES:
+                mode = "ref2v"
             by_kind = {k: [] for k in MEDIA_KINDS}
+            frames = {}
             for f in files:
                 if f["name"] in by_kind:
                     by_kind[f["name"]].append(f)
+                elif f["name"] in FRAME_KINDS:
+                    frames[f["name"]] = f
             n = {k: len(v) for k, v in by_kind.items()}
-            if n["ref_image"] > MAX_IMAGES:
-                self._err(400, "参考图最多 %d 张" % MAX_IMAGES); return
-            if n["ref_video"] > MAX_VIDEOS:
-                self._err(400, "参考视频最多 %d 段" % MAX_VIDEOS); return
-            if n["ref_audio"] > MAX_AUDIOS:
-                self._err(400, "参考音频最多 %d 段" % MAX_AUDIOS); return
-            if not any(n.values()):
-                self._err(400, "请至少上传一张参考图/视频/音频"); return
+            if mode == "ref2v":
+                if n["ref_image"] > MAX_IMAGES:
+                    self._err(400, "参考图最多 %d 张" % MAX_IMAGES); return
+                if n["ref_video"] > MAX_VIDEOS:
+                    self._err(400, "参考视频最多 %d 段" % MAX_VIDEOS); return
+                if n["ref_audio"] > MAX_AUDIOS:
+                    self._err(400, "参考音频最多 %d 段" % MAX_AUDIOS); return
+                if not any(n.values()):
+                    self._err(400, "请至少上传一张参考图/视频/音频"); return
+                if frames:
+                    self._err(400, "参考生视频不支持首/尾帧"); return
+            elif any(n.values()):
+                self._err(400, "文生视频不支持参考素材"); return
 
             seed = _to_int(_first(fields, "seed"), None, lo=0, hi=2**63 - 1)
             if seed is None:
                 seed = random.randint(0, 2**63 - 1)
             cfg = {
+                "mode": mode,
                 "tag": None,  # filled with the job id
                 "seed": seed,
                 "params": {
@@ -863,6 +896,16 @@ def make_handler(mgr):
                         wf.write(f["content"])
                     paths.append(dst)
                 cfg["media"][kind] = paths
+            for kind in FRAME_KINDS:
+                f = frames.get(kind)
+                if not f:
+                    cfg["media"][kind] = []
+                    continue
+                safe = _safe_name(f["filename"])
+                dst = os.path.join(up_dir, "%s_%s" % (kind, safe))
+                with open(dst, "wb") as wf:
+                    wf.write(f["content"])
+                cfg["media"][kind] = [dst]
             mgr.submit(cfg, jid=jid)
             self._json(202, {"id": jid, "status": "queued"})
 
@@ -874,7 +917,7 @@ HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ref2V · MiniMax H3</title>
+<title>MiniMax H3</title>
 <style>
 :root{--bg:#0f1115;--card:#171a21;--line:#252a34;--fg:#e7e9ee;--mut:#9aa3b2;
       --acc:#4f8cff;--ok:#35c07a;--warn:#e0a63a;--err:#e05a5a}
@@ -889,6 +932,9 @@ header h1{font-size:16px;margin:0 8px 0 0}
 main{display:grid;grid-template-columns:minmax(340px,460px) 1fr;gap:14px;padding:14px;max-width:1400px;margin:0 auto}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
 .card h2{font-size:14px;margin:0 0 10px;color:var(--mut);font-weight:600;letter-spacing:.03em}
+.cardhead{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}
+.cardhead h2{margin:0}
+.cardhead select{width:auto;padding:6px 10px;font-size:13px}
 label{display:block;font-size:13px;color:var(--mut);margin:10px 0 4px}
 textarea,input,select{width:100%;background:#0e1116;border:1px solid var(--line);color:var(--fg);
        border-radius:8px;padding:9px 10px;font-size:15px}
@@ -954,7 +1000,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 </head>
 <body>
 <header>
-  <h1>Ref2V · MiniMax H3</h1>
+  <h1>MiniMax H3</h1>
   <span id="pComfy" class="pill off">ComfyUI ?</span>
   <span id="pVram" class="pill">VRAM --</span>
   <span id="pQ" class="pill">队列 0</span>
@@ -964,16 +1010,30 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 <main>
   <div>
     <div class="card">
-      <h2>新建任务</h2>
-      <label>提示词（点下方素材后的「图片1 / 视频1 / 音频1」按钮即可插入 &lt;Picture 1&gt; 等引用）</label>
-      <textarea id="prompt" placeholder="Cinematic shot of the subject in <Picture 1> ..."></textarea>
+      <div class="cardhead">
+        <h2>新建任务</h2>
+        <select id="mode" onchange="onModeChange()">
+          <option value="t2v">文生视频</option>
+          <option value="ref2v">参考生视频</option>
+        </select>
+      </div>
+      <label id="promptLabel"></label>
+      <textarea id="prompt" placeholder="Cinematic shot of the subject ..."></textarea>
       <div style="margin-top:6px"><button class="ghost" id="optBtn" onclick="optimizePrompt()">提示词优化</button></div>
-      <label>参考图（≤9）</label>
-      <div class="filebox"><input id="fImg" type="file" accept="image/*" multiple><ul id="lImg"></ul></div>
-      <label>参考视频（≤3，每段 2–15s，合计 ≤15s）</label>
-      <div class="filebox"><input id="fVid" type="file" accept="video/*" multiple><ul id="lVid"></ul></div>
-      <label>参考音频（≤3，合计 ≤15s）</label>
-      <div class="filebox"><input id="fAud" type="file" accept="audio/*" multiple><ul id="lAud"></ul></div>
+      <div id="t2vBox">
+        <label>首帧（可选，单张图片）</label>
+        <div class="filebox"><input id="fFirst" type="file" accept="image/*"><ul id="lFirst"></ul></div>
+        <label>尾帧（可选，单张图片）</label>
+        <div class="filebox"><input id="fLast" type="file" accept="image/*"><ul id="lLast"></ul></div>
+      </div>
+      <div id="ref2vBox">
+        <label>参考图（≤9）</label>
+        <div class="filebox"><input id="fImg" type="file" accept="image/*" multiple><ul id="lImg"></ul></div>
+        <label>参考视频（≤3，每段 2–15s，合计 ≤15s）</label>
+        <div class="filebox"><input id="fVid" type="file" accept="video/*" multiple><ul id="lVid"></ul></div>
+        <label>参考音频（≤3，合计 ≤15s）</label>
+        <div class="filebox"><input id="fAud" type="file" accept="audio/*" multiple><ul id="lAud"></ul></div>
+      </div>
       <div class="grid3">
         <div><label>时长(秒)</label><input id="dur" type="number" value="5" min="1" max="15" step="0.5"></div>
         <div><label>步数</label><input id="steps" type="number" value="8" min="1" max="50"></div>
@@ -988,7 +1048,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
             <option value="0.6">0.6</option><option value="0.8">0.8</option>
           </select></div>
       </div>
-      <div><label>参考图缩放</label>
+      <div id="refImageSizeRow"><label>参考图缩放</label>
         <select id="ref_image_size"><option value="match">match(快)</option><option value="max">max(保真)</option></select></div>
       <button class="primary" id="submitBtn" onclick="submit()">提交任务</button>
       <div class="progress" id="prog"><i></i></div>
@@ -1041,6 +1101,7 @@ const ASPECTS = __ASPECTS__;
 let logOffset = 0, lastJob = null, jobsById = {}, curStart = 0, curRunning = false;
 const STATUS_CN = {queued:'排队中', running:'进行中', done:'已完成', failed:'失败', cancelled:'已取消', interrupted:'已中断'};
 const MEDIA_CN = {ref_image:'图', ref_video:'视频', ref_audio:'音频'};
+const MODE_CN = {t2v:'文生视频', ref2v:'参考生视频'};
 function friendlyErr(e){
   if(!e) return '';
   if(/runner exited rc=/.test(e)) return '生成进程异常退出';
@@ -1051,7 +1112,10 @@ function friendlyErr(e){
 }
 function mediaBrief(m){
   if(!m) return '';
-  return Object.keys(MEDIA_CN).map(k=> (m[k]&&m[k].length)? m[k].length+MEDIA_CN[k] : null).filter(Boolean).join(' · ');
+  const parts=Object.keys(MEDIA_CN).map(k=> (m[k]&&m[k].length)? m[k].length+MEDIA_CN[k] : null);
+  if(m.first_frame&&m.first_frame.length) parts.push('首帧');
+  if(m.last_frame&&m.last_frame.length) parts.push('尾帧');
+  return parts.filter(Boolean).join(' · ');
 }
 function friendlyStatus(j){
   if(j.status==='running'){
@@ -1070,7 +1134,7 @@ function renderCurrent(j){
   curStart = j.created_ts || curStart || 0;
   curRunning = (j.status==='running'||j.status==='queued');
   const p=j.params||{};
-  const meta=[mediaBrief(j.media), p.dur?p.dur+'s':'', p.aspect?p.aspect.split(' ')[0]:'',
+  const meta=[MODE_CN[j.mode]||'', mediaBrief(j.media), p.dur?p.dur+'s':'', p.aspect?p.aspect.split(' ')[0]:'',
               p.megapixels?p.megapixels+'MP':'', p.steps?p.steps+'步':'', j.seed?('seed '+j.seed):''].filter(Boolean).join(' · ');
   let bar='';
   if(j.status==='running' && j.progress && j.progress.total){
@@ -1126,24 +1190,59 @@ function bindFiles(inputId, listId, max, cn, prefix){
   };
   return ()=>files;
 }
+function bindOne(inputId, listId){
+  const input=$(inputId), list=$(listId); let file=null;
+  function render(){
+    list.innerHTML='';
+    if(!file) return;
+    const li=document.createElement('li');
+    const nm=document.createElement('span'); nm.className='fname'; nm.textContent=file.name;
+    const acts=document.createElement('span'); acts.className='acts';
+    const rm=document.createElement('button'); rm.className='rm'; rm.textContent='移除';
+    rm.onclick=()=>{file=null; input.value=''; render();};
+    acts.appendChild(rm); li.appendChild(nm); li.appendChild(acts); list.appendChild(li);
+  }
+  input.onchange=()=>{ file=input.files[0]||null; input.value=''; render(); };
+  return ()=>file;
+}
 const getImg = bindFiles('fImg','lImg',9,'图片','Picture');
 const getVid = bindFiles('fVid','lVid',3,'视频','Video');
 const getAud = bindFiles('fAud','lAud',3,'音频','Audio');
+const getFirst = bindOne('fFirst','lFirst');
+const getLast = bindOne('fLast','lLast');
+
+function onModeChange(){
+  const m=$('mode').value, ref=(m==='ref2v');
+  $('t2vBox').style.display = ref? 'none':'';
+  $('ref2vBox').style.display = ref? '':'none';
+  $('refImageSizeRow').style.display = ref? '':'none';
+  $('promptLabel').textContent = ref
+    ? '提示词（点下方素材后的「图片1 / 视频1 / 音频1」按钮即可插入 <Picture 1> 等引用）'
+    : '提示词（可选：上传首帧/尾帧；都不传即纯文生视频）';
+}
 
 function submit(){
+  const mode=$('mode').value;
   const prompt=$('prompt').value.trim();
   if(!prompt){ alert('请填写提示词'); return; }
-  const imgs=getImg(), vids=getVid(), auds=getAud();
-  if(!imgs.length && !vids.length && !auds.length){ alert('请至少上传一个参考素材'); return; }
   const fd=new FormData();
+  fd.append('mode', mode);
   fd.append('prompt', prompt);
   fd.append('dur', $('dur').value); fd.append('steps', $('steps').value);
   fd.append('aspect', $('aspect').value); fd.append('megapixels', $('megapixels').value);
   fd.append('ref_image_size', $('ref_image_size').value);
   if($('seed').value) fd.append('seed', $('seed').value);
-  imgs.forEach(f=>fd.append('ref_image', f));
-  vids.forEach(f=>fd.append('ref_video', f));
-  auds.forEach(f=>fd.append('ref_audio', f));
+  if(mode==='ref2v'){
+    const imgs=getImg(), vids=getVid(), auds=getAud();
+    if(!imgs.length && !vids.length && !auds.length){ alert('请至少上传一个参考素材'); return; }
+    imgs.forEach(f=>fd.append('ref_image', f));
+    vids.forEach(f=>fd.append('ref_video', f));
+    auds.forEach(f=>fd.append('ref_audio', f));
+  }else{
+    const ff=getFirst(), lf=getLast();
+    if(ff) fd.append('first_frame', ff);
+    if(lf) fd.append('last_frame', lf);
+  }
   const xhr=new XMLHttpRequest(); xhr.open('POST','/api/run');
   $('prog').style.display='block'; $('prog').firstElementChild.style.width='0%';
   $('submitBtn').disabled=true; $('submitMsg').textContent='上传中...';
@@ -1200,7 +1299,7 @@ async function refreshJobs(){
     const info=[mediaBrief(j.media), p.dur?p.dur+'s':'', p.megapixels?p.megapixels+'MP':''].filter(Boolean).join(' · ');
     const used = (j.duration!=null)? j.duration : (j.created_ts? Math.max(0, Date.now()/1000-j.created_ts) : null);
     const usedTxt = (used!=null)? ('用时 '+fmtDur(used)) : '';
-    const line2 = [info, usedTxt].filter(Boolean).join(' · ');
+    const line2 = [MODE_CN[j.mode]||'', info, usedTxt].filter(Boolean).join(' · ');
     const note = j.status==='failed'? '<span style="color:var(--err)">'+friendlyErr(j.err)+'</span>' : (j.stage&&j.status==='running'? j.stage.label : '');
     let acts='';
     if(j.status==='queued'||j.status==='running') acts='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'cancel\')">取消</button>';
@@ -1238,7 +1337,9 @@ function releaseVram(){ if(!confirm('停止 ComfyUI 并释放显存? 下次生�
 async function optimizePrompt(){
   const prompt=$('prompt').value.trim();
   if(!prompt){ $('submitMsg').textContent='请先填写提示词'; return; }
-  const counts={ref_image:getImg().length, ref_video:getVid().length, ref_audio:getAud().length};
+  const counts = $('mode').value==='ref2v'
+    ? {ref_image:getImg().length, ref_video:getVid().length, ref_audio:getAud().length}
+    : {};
   $('optText').value=''; $('optMsg').textContent='优化中…'; $('optBtn').disabled=true;
   $('optModal').classList.add('open');
   try{
@@ -1266,6 +1367,7 @@ function fallbackCopy(){
 }
 function applyOpt(){ const t=$('optText').value; if(!t) return; $('prompt').value=t; closeOpt(); }
 
+onModeChange();
 refreshState(); refreshJobs(); refreshOutputs();
 setInterval(refreshState,2000); setInterval(refreshJobs,5000); setInterval(refreshOutputs,5000); setInterval(pollLog,1500);
 </script>
@@ -1395,7 +1497,7 @@ def main():
 
     signal.signal(signal.SIGTERM, _sigterm)
     signal.signal(signal.SIGINT, _sigterm)
-    print("Ref2V Web on http://%s:%d/ (driver=%s)" % (a.host, a.port, driver))
+    print("MiniMax H3 Web on http://%s:%d/ (driver=%s)" % (a.host, a.port, driver))
     print("ComfyUI:", a.comfy_base, "| data:", data, "| auth: Basic (any user + password)")
     try:
         srv.serve_forever(poll_interval=0.5)
