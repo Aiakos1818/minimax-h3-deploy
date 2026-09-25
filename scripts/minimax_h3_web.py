@@ -1958,7 +1958,7 @@ async function clipDelete(){
   if(!r.ok){ alert('删除失败：'+(j.error||r.status)); return; }
   clipSel.clear(); updClipBar();
   removeClipsLocal(rels);
-  if(!clipsCache.length) toggleClipEdit();
+  if(clipEdit) toggleClipEdit();
   refreshProjects(); refreshJobs();
 }
 
