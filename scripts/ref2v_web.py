@@ -11,7 +11,7 @@ Usage:
 Default: http://0.0.0.0:8191/   data: <root>/.h3ref2v/   log: <root>/ref2v_web.log
 """
 import argparse, base64, glob, json, mimetypes, os, random, re, shutil, signal
-import subprocess, sys, threading, time, uuid, urllib.request
+import subprocess, sys, threading, time, uuid, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote, quote
 
@@ -28,6 +28,78 @@ ASPECTS = ["16:9 (Widescreen)", "9:16 (Portrait Widescreen)", "1:1 (Square)",
            "2:3 (Portrait Photo)", "21:9 (Ultrawide)"]
 
 NOW = lambda: time.strftime("%Y-%m-%d %H:%M:%S")
+
+# ---------------------------------------------------- prompt optimizer (cloud)
+LLM_CONF_PATH = os.path.expanduser("~/.config/h3ref2v/llm.conf")
+LLM_SYSTEM_PROMPT = (
+    "你是 MiniMax H3 参考生视频（reference-to-video）模型的提示词工程师。"
+    "请在保持原意、不改语言（中文输入→中文输出）的前提下，把用户提示词改写得更具体、更适合视频生成："
+    "补充主体与动作、镜头运动、景别、光线、氛围、风格和画质描述，写成一段连贯自然的话，不要分点、不要解释。"
+    "必须严格保持 <Picture N> / <Video N> / <Audio N> 引用标签原样不变（含编号），"
+    "不要新增不存在的引用，不要改动标签内容。只输出优化后的提示词本身。"
+)
+
+
+def load_llm_conf():
+    conf = {
+        "base": os.environ.get("REF2V_LLM_BASE", "https://api.deepseek.com/v1"),
+        "model": os.environ.get("REF2V_LLM_MODEL", "deepseek-chat"),
+        "key": os.environ.get("REF2V_LLM_KEY", ""),
+    }
+    try:
+        with open(LLM_CONF_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip().lower(), v.strip().strip('"').strip("'")
+                if k in ("base", "base_url", "url"):
+                    conf["base"] = v
+                elif k == "model":
+                    conf["model"] = v
+                elif k in ("key", "api_key"):
+                    conf["key"] = v
+    except OSError:
+        pass
+    return conf
+
+
+def llm_optimize(prompt, counts):
+    conf = load_llm_conf()
+    if not conf["key"]:
+        return False, ("未配置云端 API key：请在 %s 写 key=...，或设置环境变量 REF2V_LLM_KEY"
+                       % LLM_CONF_PATH)
+    have = "、".join("%s %d" % (cn, counts.get(k, 0)) for k, cn in
+                     (("ref_image", "参考图"), ("ref_video", "参考视频"), ("ref_audio", "参考音频"))
+                     if counts.get(k))
+    user = "可用参考素材：%s。\n\n原始提示词：\n%s" % (have or "无", prompt)
+    payload = {"model": conf["model"], "temperature": 0.7, "stream": False,
+               "messages": [{"role": "system", "content": LLM_SYSTEM_PROMPT},
+                            {"role": "user", "content": user}]}
+    req = urllib.request.Request(
+        conf["base"].rstrip("/") + "/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + conf["key"]},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=90) as r:
+            resp = json.loads(r.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            detail = ""
+        return False, "云端 API 错误 %s %s" % (e.code, detail)
+    except Exception as e:
+        return False, "调用云端失败: %r" % e
+    try:
+        text = (resp["choices"][0]["message"]["content"] or "").strip()
+    except Exception:
+        return False, "云端返回格式异常: %s" % json.dumps(resp, ensure_ascii=False)[:300]
+    text = re.sub(r"^```[a-zA-Z0-9]*\s*", "", text)
+    text = re.sub(r"\s*```$", "", text).strip()
+    return (True, text) if text else (False, "云端返回为空")
 
 
 def ref2v_length(dur):
@@ -703,6 +775,20 @@ def make_handler(mgr):
                     os.remove(cand)
                     self._json(200, {"ok": True, "msg": "已删除"}); return
                 self._err(404, "file not found"); return
+            if u.path == "/api/optimize":
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    js = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                except Exception:
+                    self._err(400, "bad json"); return
+                prompt = (js.get("prompt") or "").strip()
+                if not prompt:
+                    self._err(400, "请先填写提示词"); return
+                if len(prompt) > 4000:
+                    self._err(400, "提示词过长（>4000 字符）"); return
+                ok, text = llm_optimize(prompt, js.get("counts") or {})
+                self._json(200, {"ok": True, "text": text}) if ok else self._err(502, text)
+                return
             if u.path != "/api/run":
                 self._err(404, "not found"); return
             try:
@@ -855,6 +941,12 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .modal.open{display:flex}
 .modal .box{width:min(960px,98vw);background:#0e1116;border:1px solid var(--line);border-radius:12px;padding:10px}
 .modal video{width:100%;max-height:76vh;background:#000;border-radius:8px}
+.opttext{width:100%;min-height:220px;max-height:56vh;background:#0b0e13;color:var(--fg);
+       border:1px solid var(--line);border-radius:8px;padding:10px;font-size:13px;line-height:1.5;resize:vertical}
+.optrow{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.optacts{display:flex;gap:8px;margin-top:10px}
+.optacts button.primary,.optacts button.ghost{flex:1 1 0;width:auto;height:38px;margin:0;padding:0 10px;
+       display:flex;align-items:center;justify-content:center;box-sizing:border-box}
 .muted{color:var(--mut);font-size:12px}
 @media(max-width:980px){main{grid-template-columns:1fr}}
 @media(max-width:640px){.grid3{grid-template-columns:1fr 1fr}textarea,input,select{font-size:16px}}
@@ -875,6 +967,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
       <h2>新建任务</h2>
       <label>提示词（点下方素材后的「图片1 / 视频1 / 音频1」按钮即可插入 &lt;Picture 1&gt; 等引用）</label>
       <textarea id="prompt" placeholder="Cinematic shot of the subject in <Picture 1> ..."></textarea>
+      <div style="margin-top:6px"><button class="ghost" id="optBtn" onclick="optimizePrompt()">提示词优化</button></div>
       <label>参考图（≤9）</label>
       <div class="filebox"><input id="fImg" type="file" accept="image/*" multiple><ul id="lImg"></ul></div>
       <label>参考视频（≤3，每段 2–15s，合计 ≤15s）</label>
@@ -929,6 +1022,17 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   <div class="box">
     <video id="mvideo" controls playsinline webkit-playsinline></video>
     <div class="muted" id="mcap" style="margin-top:8px"></div>
+  </div>
+</div>
+<div class="modal" id="optModal" onclick="if(event.target===this)closeOpt()">
+  <div class="box">
+    <div class="optrow"><b>提示词优化</b><button class="ghost" onclick="closeOpt()">关闭</button></div>
+    <div class="muted" id="optMsg" style="margin-bottom:8px"></div>
+    <textarea id="optText" class="opttext" readonly placeholder="优化结果将显示在这里"></textarea>
+    <div class="optacts">
+      <button class="primary" onclick="copyOpt()">复制</button>
+      <button class="ghost" onclick="applyOpt()">替换输入框</button>
+    </div>
   </div>
 </div>
 <script>
@@ -1028,9 +1132,9 @@ const getAud = bindFiles('fAud','lAud',3,'音频','Audio');
 
 function submit(){
   const prompt=$('prompt').value.trim();
-  if(!prompt){ $('submitMsg').textContent='请填写提示词'; return; }
+  if(!prompt){ alert('请填写提示词'); return; }
   const imgs=getImg(), vids=getVid(), auds=getAud();
-  if(!imgs.length && !vids.length && !auds.length){ $('submitMsg').textContent='请至少上传一个参考素材'; return; }
+  if(!imgs.length && !vids.length && !auds.length){ alert('请至少上传一个参考素材'); return; }
   const fd=new FormData();
   fd.append('prompt', prompt);
   fd.append('dur', $('dur').value); fd.append('steps', $('steps').value);
@@ -1048,12 +1152,12 @@ function submit(){
     $('submitBtn').disabled=false;
     try{ const r=JSON.parse(xhr.responseText);
       if(xhr.status===202){ $('submitMsg').textContent='已提交: '+r.id; $('prompt').value=''; }
-      else $('submitMsg').textContent='提交失败: '+(r.error||xhr.status);
-    }catch(e){ $('submitMsg').textContent='提交失败: '+xhr.status; }
+      else alert('提交失败: '+(r.error||xhr.status));
+    }catch(e){ alert('提交失败: '+xhr.status); }
     setTimeout(()=>{ $('prog').style.display='none'; },600);
     refreshJobs();
   };
-  xhr.onerror=()=>{ $('submitBtn').disabled=false; $('submitMsg').textContent='网络错误'; };
+  xhr.onerror=()=>{ $('submitBtn').disabled=false; alert('网络错误'); };
   xhr.send(fd);
 }
 
@@ -1130,6 +1234,37 @@ function closeModal(){ $('mvideo').pause(); $('mvideo').src=''; $('modal').class
 
 function releaseVram(){ if(!confirm('停止 ComfyUI 并释放显存? 下次生成需冷启动。')) return;
   fetch('/api/service/stop',{method:'POST'}).then(async r=>{ const j=await r.json(); alert(j.msg||'ok'); refreshState(); }); }
+
+async function optimizePrompt(){
+  const prompt=$('prompt').value.trim();
+  if(!prompt){ $('submitMsg').textContent='请先填写提示词'; return; }
+  const counts={ref_image:getImg().length, ref_video:getVid().length, ref_audio:getAud().length};
+  $('optText').value=''; $('optMsg').textContent='优化中…'; $('optBtn').disabled=true;
+  $('optModal').classList.add('open');
+  try{
+    const r=await fetch('/api/optimize',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({prompt,counts})});
+    const j=await r.json().catch(()=>({}));
+    if(r.ok && j.ok){ $('optText').value=j.text; $('optMsg').textContent='优化完成'; }
+    else $('optMsg').textContent='优化失败: '+(j.error||r.status);
+  }catch(e){ $('optMsg').textContent='网络错误'; }
+  $('optBtn').disabled=false;
+}
+function closeOpt(){ $('optModal').classList.remove('open'); }
+function copyOpt(){
+  const t=$('optText').value; if(!t){ $('optMsg').textContent='暂无可复制内容'; return; }
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(()=>{ $('optMsg').textContent='已复制到剪贴板'; })
+      .catch(()=>fallbackCopy());
+  } else fallbackCopy();
+}
+function fallbackCopy(){
+  const ta=$('optText'); ta.removeAttribute('readonly'); ta.focus(); ta.select();
+  try{ document.execCommand('copy'); $('optMsg').textContent='已复制到剪贴板'; }
+  catch(e){ $('optMsg').textContent='复制失败，请手动选择文本'; }
+  ta.setAttribute('readonly','');
+}
+function applyOpt(){ const t=$('optText').value; if(!t) return; $('prompt').value=t; closeOpt(); }
 
 refreshState(); refreshJobs(); refreshOutputs();
 setInterval(refreshState,2000); setInterval(refreshJobs,5000); setInterval(refreshOutputs,5000); setInterval(pollLog,1500);
