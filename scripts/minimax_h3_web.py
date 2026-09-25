@@ -2686,7 +2686,7 @@ function mediaCard(it){
   if(it.kind==='image'){
     pv='<div class="thumbwrap"><img class="thumb" loading="lazy" src="'+esc(it.src)+'">'+
        '<a class="thumbdl" href="'+esc(it.download)+'" download="'+esc(it.downloadName)+
-       '" title="双击查看大图（右键另存为原图）" onclick="event.preventDefault()"></a></div>';
+       '" title="单击查看大图（右键另存为原图）" onclick="event.preventDefault()"></a></div>';
   }else if(it.kind==='video'){
     pv='<video class="thumb" muted playsinline preload="none" title="'+esc(it.downloadName)+'"'+
        (it.poster?' poster="'+esc(it.poster)+'"':'')+' src="'+esc(it.orig)+'"></video>';
@@ -2714,7 +2714,7 @@ function bindMediaCards(root){
   root.querySelectorAll('.matcard[data-kind]').forEach(d=>{
     const kind=d.dataset.kind, name=d.dataset.name, cap=d.dataset.cap;
     const open=()=>openViewer(kind,name,{cap:cap, src:d.dataset.view, preview:d.dataset.preview, orig:d.dataset.orig});
-    if(kind==='image'){ const ov=d.querySelector('.thumbdl'); if(ov) ov.addEventListener('dblclick',open);
+    if(kind==='image'){ const ov=d.querySelector('.thumbdl'); if(ov) ov.addEventListener('click',open);
                         const im=d.querySelector('img.thumb'); if(im) im.addEventListener('click',open); }
     else if(kind==='video'){ const v=d.querySelector('video.thumb'); if(v) v.addEventListener('click',open); }
     else { const ic=d.querySelector('.thumbicon'); if(ic) ic.addEventListener('click',open); }
@@ -2945,14 +2945,14 @@ function renderMaterials(){
           // show the cached thumbnail but let right-click save the original file
           pv='<div class="thumbwrap"><img class="thumb" loading="lazy" src="'+thumbUrl(pid,m.file,m.thumb_v,nm)+'">'+
              '<a class="thumbdl" href="'+matUrl(pid,m.file,nm)+'" download="'+esc(nm)+
-             '" title="双击查看大图（右键另存为原图）" onclick="event.preventDefault()"></a></div>';
+             '" title="单击查看大图（右键另存为原图）" onclick="event.preventDefault()"></a></div>';
         }
         d.innerHTML=pv+'<div class="mb"><div class="nm" title="'+esc(m.name)+'">'+esc(m.name)+'</div>'+
           '<div class="mm">'+MAT_KIND_CN[m.kind]+' · '+fmtSize(m.size)+(m.exists?'':' · 文件缺失')+'</div></div>';
         if(m.exists){
           if(m.kind==='image'){
             const ov=d.querySelector('.thumbdl');
-            if(ov) ov.addEventListener('dblclick',()=>viewMaterial(m.id));
+            if(ov) ov.addEventListener('click',()=>viewMaterial(m.id));
           }else if(m.kind==='video'){
             d.firstElementChild.addEventListener('click',()=>viewMaterial(m.id));
           }else if(m.kind==='audio'){
@@ -3047,7 +3047,7 @@ function renderImageList(){
     const d=document.createElement('div'); d.className='job';
     d.innerHTML='<span class="jthumbwrap"><img class="jthumb" loading="lazy" title="'+esc(nm)+'" src="'+thumbUrl(pid,m.file,m.thumb_v,nm)+'">'+
       '<a class="thumbdl" href="'+esc(matUrl(pid,m.file,nm))+'" download="'+esc(nm)+
-      '" title="双击查看大图（右键另存为原图）" onclick="event.preventDefault()"></a></span>'+
+      '" title="单击查看大图（右键另存为原图）" onclick="event.preventDefault()"></a></span>'+
       '<span class="meta"><b>'+esc(m.name)+'</b><br><b>'+esc(m.id)+'</b><br>'+
         esc(gen)+' · '+fmtSize(m.size)+'<br>'+esc(m.ts||'')+'<br>'+st+'</span>'+
       '<span class="jobsacts"><button class="ghost">详情</button> <button class="ghost">删除</button> '+
