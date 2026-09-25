@@ -1670,14 +1670,15 @@ header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:8px;align
 header h1{font-size:16px;margin:0 8px 0 0}
 .pill{font-size:12px;padding:3px 9px;border-radius:999px;background:#20242d;color:var(--mut);white-space:nowrap}
 .pill.on{color:#0b0d11;background:var(--ok)} .pill.off{color:#0b0d11;background:var(--err)}
-.spacer{flex:1}
+.hdrright{display:flex;gap:8px;align-items:center;margin-left:auto;flex-wrap:wrap}
 main{padding:14px;max-width:1400px;margin:0 auto}
 .cols{display:grid;grid-template-columns:minmax(340px,460px) 1fr;gap:14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
 .card h2{font-size:14px;margin:0 0 10px;color:var(--mut);font-weight:600;letter-spacing:.03em}
 .cardhead{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}
 .cardhead h2{margin:0}
-.cardhead.modehead{justify-content:flex-start}
+.cardhead.modehead{justify-content:flex-start;flex-wrap:wrap}
+.cardhead.modehead h2{white-space:nowrap}
 .cardhead select{width:auto;padding:6px 10px;font-size:13px}
 label{display:block;font-size:13px;color:var(--mut);margin:10px 0 4px}
 textarea,input,select{width:100%;background:#0e1116;border:1px solid var(--line);color:var(--fg);
@@ -1698,7 +1699,7 @@ textarea{min-height:96px;resize:vertical}
 button.primary{width:100%;margin-top:14px;padding:12px;border:0;border-radius:9px;background:var(--acc);
        color:#fff;font-size:15px;font-weight:600;cursor:pointer}
 button.primary:disabled{opacity:.5;cursor:default}
-.headacts{display:flex;gap:8px;align-items:center;flex:0 0 auto}
+.headacts{display:flex;gap:10px;align-items:center;margin-left:auto}
 .headacts button{width:auto;min-width:76px;height:34px;margin:0;padding:0 16px;border-radius:8px;
         font-size:14px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center}
 .headacts button.primary{width:auto;padding:0 16px;font-size:14px}
@@ -1826,8 +1827,20 @@ details.sec>summary .editbtn{margin-left:auto}
   .editgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr);gap:14px}
   .editgrid>.card{margin-bottom:0}
 }
-@media(max-width:980px){.cols{grid-template-columns:1fr}}
-@media(max-width:640px){.grid3{grid-template-columns:1fr 1fr}textarea,input,select{font-size:16px}}
+@media(max-width:980px){.cols{grid-template-columns:1fr}
+  #projHead .cardhead{flex-wrap:wrap}
+  #projHead .cardhead h2{flex:1 1 100%}
+  .headacts{flex:1 1 100%;margin-left:0}
+  .headacts button{flex:1 1 0;width:auto;min-width:0;height:42px;padding:0;font-size:15px}
+  .headacts button.primary{width:auto;padding:0;font-size:15px}
+}
+@media(max-width:640px){.grid3{grid-template-columns:1fr 1fr}textarea,input,select{font-size:16px}
+  .hdrright{margin-left:0}
+  .params{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .params>.grid3,.params>.grid2{display:contents}
+  .params .refsize{grid-column:1/-1}
+  .params .fseed{order:5}
+}
 .docbody{color:var(--fg);font-size:14px;line-height:1.68}
 .docbody h1{font-size:22px;margin:4px 0 12px}
 .docbody h2{font-size:18px;margin:20px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--line)}
@@ -1852,10 +1865,11 @@ details.sec>summary .editbtn{margin-left:auto}
 <header>
   <h1 style="cursor:pointer" onclick="goHome()" title="全部项目">MiniMax H3</h1>
   <span id="pComfy" class="pill off">ComfyUI ?</span>
-  <span id="pVram" class="pill">VRAM --</span>
   <span id="pQ" class="pill">队列 0</span>
-  <span class="spacer"></span>
-  <button class="ghost" onclick="releaseVram()">释放显存</button>
+  <span class="hdrright">
+    <span id="pVram" class="pill">VRAM --</span>
+    <button class="ghost" onclick="releaseVram()">释放显存</button>
+  </span>
 </header>
 <main>
   <div id="homeView">
@@ -1888,7 +1902,6 @@ details.sec>summary .editbtn{margin-left:auto}
           <option value="t2v">文生视频</option>
           <option value="ref2v">参考生视频</option>
         </select>
-        <span class="spacer"></span>
         <span class="headacts">
           <button class="primary" id="submitBtn" onclick="submit()">提交</button>
           <button class="ghost" onclick="resetForm()">重置</button>
@@ -1939,7 +1952,7 @@ details.sec>summary .editbtn{margin-left:auto}
         <div class="grid3">
           <div><label>时长(秒)</label><input id="dur" type="number" value="5" min="1" max="15" step="0.5"></div>
           <div><label>步数</label><input id="steps" type="number" value="8" min="1" max="50"></div>
-          <div><label>seed(空=随机)</label><input id="seed" type="number" placeholder="随机"></div>
+          <div class="fseed"><label>seed(空=随机)</label><input id="seed" type="number" placeholder="随机"></div>
         </div>
         <div class="grid2">
           <div><label>画幅</label><select id="aspect"></select></div>
