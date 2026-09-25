@@ -771,6 +771,31 @@ class Manager:
         lst.sort(key=lambda x: x.get("created") or "", reverse=True)
         return lst
 
+    def delete_outputs(self, rels):
+        base = os.path.realpath(self.out_root)
+        names, removed = set(), 0
+        for rel in rels or []:
+            rel = (rel or "").strip()
+            cand = os.path.realpath(os.path.join(base, rel)) if rel else base
+            if not rel or (cand != base and not cand.startswith(base + os.sep)):
+                continue
+            if os.path.isfile(cand):
+                try:
+                    os.remove(cand)
+                except OSError:
+                    continue
+                removed += 1
+                names.add(os.path.basename(cand))
+        if names:
+            with self.lock:
+                for job in self.jobs.values():
+                    r = job["st"].get("clip_rel")
+                    if r and os.path.basename(r) in names:
+                        job["st"].pop("clip_rel", None)
+                        job["st"].pop("clip_size", None)
+                        self.persist_status(job)
+        return removed
+
     def clips_list(self, project=None):
         out_root = self.out_root
         clips = []
@@ -1002,15 +1027,15 @@ def make_handler(mgr):
                     js = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
                 except Exception:
                     self._err(400, "bad json"); return
-                rel = (js.get("rel") or "").strip()
-                base = os.path.realpath(os.path.join(mgr.root, "output"))
-                cand = os.path.realpath(os.path.join(base, rel)) if rel else base
-                if not rel or (cand != base and not cand.startswith(base + os.sep)):
-                    self._err(403, "bad path"); return
-                if os.path.isfile(cand):
-                    os.remove(cand)
-                    self._json(200, {"ok": True, "msg": "已删除"}); return
-                self._err(404, "file not found"); return
+                rels = js.get("rels")
+                if rels is None:
+                    rel = (js.get("rel") or "").strip()
+                    rels = [rel] if rel else []
+                removed = mgr.delete_outputs(rels)
+                if removed:
+                    self._json(200, {"ok": True, "removed": removed,
+                                     "msg": "已删除 %d 个" % removed}); return
+                self._err(404, "没有可删除的文件"); return
             if u.path == "/api/optimize":
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
@@ -1200,9 +1225,17 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .st.failed,.st.cancelled,.st.interrupted{background:var(--err);color:#fff}.st.queued{background:var(--warn);color:#0b0d11}
 .job .meta{font-size:12px;color:var(--mut);flex:1;min-width:160px}
 .clips{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
-.clip{background:#0e1116;border:1px solid var(--line);border-radius:10px;overflow:hidden;cursor:pointer}
+.clip{position:relative;background:#0e1116;border:1px solid var(--line);border-radius:10px;overflow:hidden;cursor:pointer}
 .clip video,.clip .ph{width:100%;aspect-ratio:16/9;background:#000;display:block;object-fit:cover}
 .clip .cap{padding:6px 8px;font-size:12px;color:var(--mut)}
+.clip .pick{position:absolute;top:6px;left:6px;width:22px;height:22px;border-radius:6px;line-height:1;
+       background:rgba(0,0,0,.55);border:2px solid #fff;display:flex;align-items:center;justify-content:center;
+       font-size:14px;color:#fff}
+.clip.sel{outline:3px solid var(--acc);outline-offset:-3px}
+.clip.sel .pick{background:var(--acc);border-color:var(--acc)}
+.clipbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.clipbar .muted{margin-right:auto}
+details.sec>summary .editbtn{margin-left:auto}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;align-items:center;justify-content:center;z-index:20;padding:12px}
 .modal.open{display:flex}
 .modal .box{width:min(960px,98vw);background:#0e1116;border:1px solid var(--line);border-radius:12px;padding:10px}
@@ -1319,7 +1352,13 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
     </div>
     <div class="card">
       <details class="sec" open>
-        <summary>产物</summary>
+        <summary>产物<button class="ghost editbtn" id="clipEditBtn" onclick="event.preventDefault();event.stopPropagation();toggleClipEdit()">编辑</button></summary>
+        <div id="clipBar" class="clipbar" style="display:none">
+          <span class="muted" id="clipCount">已选 0</span>
+          <button class="ghost" onclick="clipSelectAll()">全选</button>
+          <button class="ghost" onclick="clipSelectNone()">取消全选</button>
+          <button class="ghost" style="color:var(--err)" onclick="clipDelete()">删除</button>
+        </div>
         <div id="clips" class="clips"></div>
       </details>
     </div>
@@ -1358,12 +1397,23 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
     </div>
   </div>
 </div>
+<div class="modal" id="askModal" onclick="if(event.target===this)askResolve(false)">
+  <div class="box" style="width:min(420px,96vw)">
+    <div class="optrow"><b id="askTitle">确认</b></div>
+    <div class="muted" id="askMsg" style="margin-bottom:14px"></div>
+    <div class="optacts">
+      <button class="ghost" onclick="askResolve(false)">取消</button>
+      <button class="primary" id="askOk" onclick="askResolve(true)">确定</button>
+    </div>
+  </div>
+</div>
 <script>
 const $ = (id)=>document.getElementById(id);
 const esc = (s)=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ASPECTS = __ASPECTS__;
 let logOffset = 0, lastJob = null, jobsById = {}, curStart = 0, curRunning = false;
 let projects = [], projNames = {}, curProject = null, projectsLoaded = false;
+let clipEdit = false, clipSel = new Set(), clipsCache = [];
 const STATUS_CN = {queued:'排队中', running:'进行中', done:'已完成', failed:'失败', cancelled:'已取消', interrupted:'已中断'};
 const MEDIA_CN = {ref_image:'图', ref_video:'视频', ref_audio:'音频'};
 const MODE_CN = {t2v:'文生视频', ref2v:'参考生视频'};
@@ -1411,7 +1461,10 @@ function route(){
   const m=location.hash.match(/^#\/p\/(.+)$/);
   const pid=m?decodeURIComponent(m[1]):null;
   if(pid && projNames[pid]!==undefined){
-    if(curProject!==pid){ curProject=pid; $('jobs')._sig=''; $('clips')._sig=''; }
+    if(curProject!==pid){ curProject=pid; $('jobs')._sig=''; $('clips')._sig='';
+      jobsById={}; lastJob=null; logOffset=0; $('log').textContent='';
+      if(clipEdit){ clipEdit=false; clipSel.clear(); $('clipBar').style.display='none';
+        $('clipEditBtn').textContent='编辑'; } }
     $('homeView').style.display='none'; $('projView').style.display='';
     renderProjHead(); refreshJobs(); refreshOutputs();
   }else{
@@ -1465,6 +1518,17 @@ async function confirmDeleteProject(){
   goHome(); await refreshProjects();
 }
 $('delClips').onchange=updDelHint;
+let askCb=null;
+function askConfirm(msg,title,okText){
+  return new Promise(res=>{
+    askCb=res;
+    $('askTitle').textContent=title||'确认';
+    $('askMsg').innerHTML=msg;
+    $('askOk').textContent=okText||'确定';
+    $('askModal').classList.add('open');
+  });
+}
+function askResolve(v){ $('askModal').classList.remove('open'); const cb=askCb; askCb=null; if(cb) cb(v); }
 function friendlyErr(e){
   if(!e) return '';
   if(/runner exited rc=/.test(e)) return '生成进程异常退出';
@@ -1644,13 +1708,21 @@ async function refreshState(){
     $('pVram').textContent='VRAM '+s.vram.map(v=>Math.round(v.used/1073741824)+'/'+Math.round(v.total/1073741824)+'G').join(' ');
   }
   $('pQ').textContent='队列 '+((s.queue||[]).length+(s.current?1:0));
-  if(s.current){
-    const j=s.current;
+  if(!curProject) return;
+  let j=s.current;
+  if(j && j.project!==curProject) j=null;            // 只显示本项目任务
+  if(!j) j=(lastJob && jobsById[lastJob]) || null;
+  if(j && j.project!==curProject) j=null;
+  if(j){
     if(lastJob!==j.id){ lastJob=j.id; logOffset=0; $('log').textContent=''; }
     renderCurrent(j);
-  }else if(lastJob && jobsById[lastJob]){
-    renderCurrent(jobsById[lastJob]);
+  }else{
+    lastJob=null; renderCurrentEmpty();
   }
+}
+function renderCurrentEmpty(){
+  if($('cur')._sig==='EMPTY') return;
+  $('cur')._sig='EMPTY'; $('cur').innerHTML='<div class="muted">空闲</div>';
 }
 
 async function pollLog(){
@@ -1707,18 +1779,58 @@ function jobAct(id,act){ if(!confirm(act==='cancel'?'取消任务 '+id+'?':'删�
 async function refreshOutputs(){
   if(!curProject) return;
   const r=await api('/api/outputs?project='+encodeURIComponent(curProject)); if(!r) return;
+  clipsCache=r.clips||[];
   const box=$('clips');
-  const sig=r.clips.map(c=>c.rel+'|'+c.size).join('\n');
+  const sig=clipsCache.map(c=>c.rel+'|'+c.size).join('\n');
   if(box._sig===sig) return;
   box._sig=sig;
-  if(!r.clips.length){ box.innerHTML='<span class="muted">暂无产物</span>'; return; }
+  if(!clipsCache.length){ box.innerHTML='<span class="muted">暂无产物</span>'; return; }
   box.innerHTML='';
-  r.clips.forEach(c=>{
-    const d=document.createElement('div'); d.className='clip'; d.onclick=()=>play(c.rel);
-    d.innerHTML='<video preload="metadata" muted playsinline src="/files/'+encodeURI(c.rel)+'"></video>'+
+  clipsCache.forEach(c=>{
+    const sel=clipSel.has(c.rel);
+    const d=document.createElement('div'); d.className='clip'+(sel?' sel':''); d.dataset.rel=c.rel;
+    d.onclick=()=>{ if(clipEdit) toggleClip(c.rel,d); else play(c.rel); };
+    const pick=clipEdit? '<span class="pick">'+(sel?'\u2713':'')+'</span>' : '';
+    d.innerHTML=pick+'<video preload="metadata" muted playsinline src="/files/'+encodeURI(c.rel)+'"></video>'+
       '<div class="cap">'+c.name.slice(0,20)+'<br>'+fmtSize(c.size)+' · '+c.ts+'</div>';
     box.appendChild(d);
   });
+}
+
+function updClipBar(){ $('clipCount').textContent='已选 '+clipSel.size; }
+function toggleClipEdit(){
+  clipEdit=!clipEdit; clipSel.clear();
+  $('clipBar').style.display=clipEdit?'flex':'none';
+  $('clipEditBtn').textContent=clipEdit?'完成':'编辑';
+  $('clips')._sig=''; refreshOutputs(); updClipBar();
+}
+function toggleClip(rel,el){
+  if(clipSel.has(rel)) clipSel.delete(rel); else clipSel.add(rel);
+  el.classList.toggle('sel',clipSel.has(rel));
+  const pk=el.querySelector('.pick'); if(pk) pk.textContent=clipSel.has(rel)?'\u2713':'';
+  updClipBar();
+}
+function syncClipSel(){
+  $('clips').querySelectorAll('.clip').forEach(el=>{
+    const on=clipSel.has(el.dataset.rel);
+    el.classList.toggle('sel',on);
+    const pk=el.querySelector('.pick'); if(pk) pk.textContent=on?'\u2713':'';
+  });
+  updClipBar();
+}
+function clipSelectAll(){ clipsCache.forEach(c=>clipSel.add(c.rel)); syncClipSel(); }
+function clipSelectNone(){ clipSel.clear(); syncClipSel(); }
+async function clipDelete(){
+  const rels=[...clipSel];
+  if(!rels.length){ alert('请先选择要删除的产物'); return; }
+  const ok=await askConfirm('确定删除选中的 <b>'+rels.length+'</b> 个产物？删除后不可恢复。','删除产物','删除');
+  if(!ok) return;
+  const r=await fetch('/api/output/delete',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rels})});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){ alert('删除失败：'+(j.error||r.status)); return; }
+  clipSel.clear(); updClipBar();
+  $('clips')._sig=''; refreshOutputs(); refreshProjects(); refreshJobs();
 }
 
 function play(rel){ $('mvideo').src='/files/'+encodeURI(rel); $('mcap').textContent=rel;
