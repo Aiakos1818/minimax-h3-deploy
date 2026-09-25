@@ -2103,7 +2103,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
       </div>
       <div class="card" id="stJobs">
         <details class="sec" open>
-          <summary>分镜记录</summary>
+          <summary>分镜列表</summary>
           <div id="jobs" class="muted">暂无</div>
         </details>
         <span class="cardacts"><button class="ghost" onclick="openEdit()">剪辑</button></span>
@@ -2374,7 +2374,7 @@ async function renameProject(){
 let delPid=null;
 function updDelHint(){
   $('delHint').textContent = $('delClips').checked
-    ? '将同时删除该项目下的分镜记录与视频文件，不可恢复。'
+    ? '将同时删除该项目下的分镜列表与视频文件，不可恢复。'
     : '不删除产物：项目内分镜将转为「默认项目」，视频文件保留。';
 }
 function deleteProject(){
@@ -2743,7 +2743,7 @@ async function deleteMaterial(mid){
       j.media[k].some(p=>String(p).split('/').pop()===m.file)));
   let msg='删除素材「<b>'+esc(m.name)+'</b>」？';
   if(used.length){
-    msg+='<br><br>以下分镜记录用到了该素材：<br>'+
+    msg+='<br><br>以下分镜列表用到了该素材：<br>'+
       used.map(j=>'· '+esc(j.name||j.id)).join('<br>')+
       '<br><br>删除后这些分镜的素材引用会失效。';
   }
