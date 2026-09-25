@@ -1810,6 +1810,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .jthumb.ph.static{animation:none;background:#0e1116}
 @keyframes phshim{0%{background-position:100% 0}100%{background-position:-100% 0}}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;align-items:center;justify-content:center;z-index:20;padding:12px}
+#viewModal{z-index:30}
 .modal.open{display:flex}
 .modal .box{width:min(960px,98vw);background:#0e1116;border:1px solid var(--line);border-radius:12px;padding:10px}
 .modal video{width:100%;max-height:76vh;background:#000;border-radius:8px}
@@ -1833,11 +1834,6 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .projcard .meta2{font-size:12px;color:var(--mut)}
 .bcbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .projsub{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.mediagrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:6px}
-.mediagrid img,.mediagrid video{width:100%;aspect-ratio:16/9;object-fit:cover;background:#000;
-       border-radius:8px;border:1px solid var(--line)}
-.medialist{display:block;margin-top:6px}
-.medialist audio{width:100%;display:block;margin-top:6px}
 .matup{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .matup #matName{flex:1 1 240px;min-width:0}
 .matup #matFile{flex:1 1 260px;min-width:0;padding:7px 10px;font-size:13px}
@@ -2429,36 +2425,68 @@ function mediaUrl(jid,pid,p){
   if(oi>=0) return '/files/'+encodeURI(p.slice(oi+8));
   return '/media/'+encodeURIComponent(jid)+'/'+encodeURIComponent(p.split('/').pop());
 }
+function detailMedia(p,jid,pid,fallback){
+  p=String(p); const fn=p.split('/').pop();
+  if(pid && p.indexOf('/materials/')>=0){
+    const mt=matByFile(fn);
+    if(mt && mt.exists){
+      const nm=matSaveName(mt);
+      return {kind:mt.kind, name:mt.name, src:thumbUrl(pid,mt.file,mt.thumb_v,nm),
+        preview:previewUrl(pid,mt.file,mt.thumb_v,nm), orig:matUrl(pid,mt.file,nm),
+        download:matUrl(pid,mt.file,nm), downloadName:nm, poster:thumbUrl(pid,mt.file,mt.thumb_v,nm)};
+    }
+  }
+  const oi=p.indexOf('/output/');
+  if(oi>=0){
+    const rel=p.slice(oi+8), u='/files/'+encodeURI(rel);
+    const c=clipsCache.find(x=>x.rel===rel);
+    const name=(c&&c.shot)||fn;
+    return {kind:'video', name:name, src:'/vthumb/'+encodeURI(rel), preview:'',
+      orig:u, download:u, downloadName:withExt(name,fileExt(fn)), poster:'/vthumb/'+encodeURI(rel)};
+  }
+  const u=mediaUrl(jid,pid,p);
+  const kind=/\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(fn)?'video'
+           :(/\.(mp3|wav|m4a|aac|flac|ogg)$/i.test(fn)?'audio':(fallback||'image'));
+  return {kind:kind, name:fn, src:u, preview:'', orig:u, download:u, downloadName:fn, poster:''};
+}
+function mediaCard(it){
+  let pv;
+  if(it.kind==='image'){
+    pv='<div class="thumbwrap"><img class="thumb" loading="lazy" src="'+esc(it.src)+'">'+
+       '<a class="thumbdl" href="'+esc(it.download)+'" download="'+esc(it.downloadName)+
+       '" title="双击查看大图（右键另存为原图）" onclick="event.preventDefault()"></a></div>';
+  }else if(it.kind==='video'){
+    pv='<video class="thumb" muted playsinline preload="none" title="'+esc(it.downloadName)+'"'+
+       (it.poster?' poster="'+esc(it.poster)+'"':'')+' src="'+esc(it.orig)+'"></video>';
+  }else{
+    pv='<div class="thumbicon"><span class="audplay">▶</span>音频</div>';
+  }
+  return '<div class="matcard" data-kind="'+it.kind+'" data-name="'+esc(it.name)+'" data-cap="'+MAT_KIND_CN[it.kind]+
+    '" data-view="'+esc(it.src)+'" data-preview="'+esc(it.preview)+'" data-orig="'+esc(it.orig)+'">'+pv+
+    '<div class="mb"><div class="nm" title="'+esc(it.name)+'">'+esc(it.name)+'</div>'+
+    '<div class="mm">'+MAT_KIND_CN[it.kind]+'</div></div></div>';
+}
 function mediaSection(jid,m,pid){
-  const groups=[['ref_image','参考图','img'],['ref_video','参考视频','video'],
-                ['ref_audio','参考音频','audio'],['first_frame','首帧','img'],['last_frame','尾帧','img']];
+  const groups=[['ref_image','参考图片','image'],['ref_video','参考视频','video'],
+                ['ref_audio','参考音频','audio'],['first_frame','首帧','image'],['last_frame','尾帧','image']];
   let h='';
-  groups.forEach(([k,label,kind])=>{
+  groups.forEach(([k,label,fallback])=>{
     const arr=m[k]||[]; if(!arr.length) return;
-    h+='<div style="margin-top:12px"><div class="muted">'+label+' ('+arr.length+')</div>'+
-       '<div class="'+(kind==='audio'?'medialist':'mediagrid')+'">';
-    arr.forEach(p=>{
-      const u=mediaUrl(jid,pid,p);
-      if(kind==='img'){
-        let src=u;
-        if(pid && String(p).indexOf('/materials/')>=0){
-          const mt=matByFile(String(p).split('/').pop());
-          if(mt && mt.exists) src=previewUrl(pid,mt.file,mt.thumb_v,matSaveName(mt));
-        }
-        h+='<img src="'+src+'" loading="lazy">';
-      }
-      else if(kind==='video') h+='<video controls preload="metadata" playsinline src="'+u+'"></video>';
-      else h+='<audio controls preload="metadata" src="'+u+'"></audio>';
-    });
+    h+='<div class="matgroup"><div class="matgrouphead">'+label+' ('+arr.length+')</div><div class="matgrid">';
+    arr.forEach(p=>{ h+=mediaCard(detailMedia(p,jid,pid,fallback)); });
     h+='</div></div>';
   });
-  return h;
+  return h? '<div class="matgroups" style="margin-top:14px">'+h+'</div>' : '';
 }
-function bindSinglePlay(root){
-  const els=root.querySelectorAll('video,audio');
-  els.forEach(el=>el.addEventListener('play',()=>{
-    els.forEach(o=>{ if(o!==el && !o.paused) o.pause(); });
-  }));
+function bindMediaCards(root){
+  root.querySelectorAll('.matcard[data-kind]').forEach(d=>{
+    const kind=d.dataset.kind, name=d.dataset.name, cap=d.dataset.cap;
+    const open=()=>openViewer(kind,name,{cap:cap, src:d.dataset.view, preview:d.dataset.preview, orig:d.dataset.orig});
+    if(kind==='image'){ const ov=d.querySelector('.thumbdl'); if(ov) ov.addEventListener('dblclick',open);
+                        const im=d.querySelector('img.thumb'); if(im) im.addEventListener('click',open); }
+    else if(kind==='video'){ const v=d.querySelector('video.thumb'); if(v) v.addEventListener('click',open); }
+    else { const ic=d.querySelector('.thumbicon'); if(ic) ic.addEventListener('click',open); }
+  });
 }
 function showJob(id){
   const j=jobsById[id]; if(!j) return;
@@ -2477,7 +2505,7 @@ function showJob(id){
   h+='<div style="margin-top:12px"><div class="muted">提示词</div><div class="detprompt">'+esc(p.prompt||'')+'</div></div>';
   h+=mediaSection(id,m,j.project);
   $('jBody').innerHTML=h;
-  bindSinglePlay($('jBody'));
+  bindMediaCards($('jBody'));
   $('jobModal').classList.add('open');
 }
 function closeJob(){
@@ -3254,28 +3282,34 @@ function play(rel){ $('mvideo').src='/files/'+encodeURI(rel); $('mcap').textCont
 function closeModal(){ $('mvideo').pause(); $('mvideo').src=''; $('modal').classList.remove('open'); }
 
 function previewUrl(pid,file,v,name){ return '/preview/'+encodeURIComponent(pid)+'/'+encodeURIComponent(String(file).split('/').pop())+tailName(name)+(v?'?v='+v:''); }
+function openViewer(kind,name,o){
+  o=o||{};
+  const isImg=kind==='image';
+  $('viewOrig').style.display = (isImg && o.preview && o.orig) ? '' : 'none';
+  let h;
+  if(isImg){
+    h='<img src="'+esc(o.src)+'"'+(o.preview?' data-preview="'+esc(o.preview)+'"':'')+(o.orig?' data-orig="'+esc(o.orig)+'"':'')+'>';
+  }else if(kind==='video'){
+    h='<video controls autoplay playsinline title="'+esc(name)+'" src="'+esc(o.orig)+'"></video>';
+  }else{
+    h='<audio controls autoplay title="'+esc(name)+'" src="'+esc(o.orig)+'"></audio>';
+  }
+  $('viewCap').textContent=name+(o.cap?' · '+o.cap:'');
+  $('viewBody').innerHTML=h;
+  $('viewBody').querySelectorAll('video,audio').forEach(x=>x.play().catch(()=>{}));
+  $('viewModal').classList.add('open');
+  if(isImg && o.preview){
+    const el=$('viewBody').querySelector('img');
+    if(el){ const pre=new Image(); pre.onload=()=>{ if(el.isConnected) el.src=pre.src; }; pre.src=o.preview; }
+  }
+}
 function viewMaterial(mid){
   const m=matById(mid); if(!m) return;
   if(!m.exists){ notice('素材文件缺失：'+m.name); return; }
-  const nm=matSaveName(m), u=matUrl(curProject,m.file,nm), pid=curProject;
-  $('viewOrig').style.display = m.kind==='image' ? '' : 'none';
-  let h;
-  if(m.kind==='image'){
-    // show the cached thumbnail at once, then swap in the downscaled preview
-    h='<img src="'+thumbUrl(pid,m.file,m.thumb_v,nm)+'" data-preview="'+previewUrl(pid,m.file,m.thumb_v,nm)+'" data-orig="'+u+'">';
-  }else if(m.kind==='video'){
-    h='<video controls autoplay playsinline title="'+esc(nm)+'" src="'+u+'"></video>';
-  }else{
-    h='<audio controls autoplay title="'+esc(nm)+'" src="'+u+'"></audio>';
-  }
-  $('viewCap').textContent=m.name+' · '+MAT_KIND_CN[m.kind];
-  $('viewBody').innerHTML=h;
-  $('viewBody').querySelectorAll('video,audio').forEach(o=>o.play().catch(()=>{}));
-  $('viewModal').classList.add('open');
-  if(m.kind==='image'){
-    const el=$('viewBody').querySelector('img');
-    if(el){ const pre=new Image(); pre.onload=()=>{ if(el.isConnected) el.src=pre.src; }; pre.src=el.dataset.preview; }
-  }
+  const nm=matSaveName(m), pid=curProject, u=matUrl(pid,m.file,nm);
+  if(m.kind==='image') openViewer('image', m.name, {cap:MAT_KIND_CN[m.kind],
+    src:thumbUrl(pid,m.file,m.thumb_v,nm), preview:previewUrl(pid,m.file,m.thumb_v,nm), orig:u});
+  else openViewer(m.kind, m.name, {cap:MAT_KIND_CN[m.kind], orig:u});
 }
 function viewOriginal(){
   const el=$('viewBody').querySelector('img'); if(!el) return;
