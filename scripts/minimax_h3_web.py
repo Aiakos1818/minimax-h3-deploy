@@ -2980,6 +2980,17 @@ function renderSlot(kind){
     }
     if(!pv) pv='<div class="thumbicon">'+MAT_KIND_CN[SLOT_MEDIA[kind]]+'</div>';
     li.innerHTML=pv+'<div class="nm" title="'+esc(it.name)+'">'+esc(it.name)+'</div>';
+    const thumb=li.firstElementChild;
+    if(thumb){
+      thumb.style.cursor='pointer';
+      if(it.src==='mat'){
+        const m=matById(it.id);
+        if(m) thumb.onclick=()=>viewMaterial(m.id);
+      }else{
+        const c=clipsCache.find(x=>x.rel===it.rel);
+        if(c) thumb.onclick=()=>openViewer('video', c.shot||c.name, {cap:'产物', orig:'/files/'+encodeURI(c.rel)});
+      }
+    }
     const acts=document.createElement('div'); acts.className='acts';
     if(cfg.prefix){
       const chip=document.createElement('button'); chip.className='chip'; chip.textContent=cfg.prefix+(i+1);
