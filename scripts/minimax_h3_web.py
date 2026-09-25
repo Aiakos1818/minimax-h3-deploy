@@ -43,6 +43,9 @@ IMG_ORIG_MAX = 800 * 1024
 IMG_THUMB_MAX_BYTES = 500 * 1024
 THUMB_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_thumb.py")
 VTHUMB_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_vthumb.py")
+QWEN_SERVER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen_image_server.py")
+QWEN_PORT = int(os.environ.get("H3_QWEN_PORT", "8193"))
+QWEN_CACHE = os.path.expanduser("~/.cache/h3qwen")
 MODES = ("t2v", "ref2v")
 IMAGE_MODES = ("t2i", "i2i")
 IMAGE_MODELS = ("zimage", "qwen")
@@ -320,6 +323,74 @@ class ComfyHealth:
             pass
 
 
+# ------------------------------------------------------ Qwen-Image-2.1 service
+def qwen_pidfile(port=QWEN_PORT):
+    return os.path.join(QWEN_CACHE, "server-%d.pid" % port)
+
+
+def qwen_logfile(port=QWEN_PORT):
+    return os.path.join(QWEN_CACHE, "server-%d.log" % port)
+
+
+def qwen_pid(port=QWEN_PORT):
+    try:
+        with open(qwen_pidfile(port)) as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
+def qwen_health(port=QWEN_PORT, timeout=3):
+    try:
+        r = urllib.request.urlopen("http://127.0.0.1:%d/health" % port, timeout=timeout)
+        return bool(json.loads(r.read().decode("utf-8")).get("ok"))
+    except Exception:
+        return False
+
+
+def stop_qwen_server(port=QWEN_PORT, timeout=45, log=None):
+    """Stop the resident Qwen service (if any) and wait for it to free the GPUs."""
+    def w(msg):
+        if log:
+            log.write(msg + "\n"); log.flush()
+        else:
+            print(msg)
+
+    pid = qwen_pid(port)
+    if not pid and not qwen_health(port, 1):
+        return False
+    w("[web] stopping resident Qwen-Image-2.1 (pid=%s)" % pid)
+    try:
+        req = urllib.request.Request("http://127.0.0.1:%d/unload" % port, data=b"",
+                                     method="POST")
+        urllib.request.urlopen(req, timeout=10).read()
+    except Exception:
+        pass
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        alive = False
+        if pid:
+            try:
+                os.kill(pid, 0); alive = True
+            except OSError:
+                alive = False
+        if not alive and not qwen_health(port, 1):
+            break
+        time.sleep(0.5)
+    if pid:
+        try:
+            os.kill(pid, 0)
+            w("[web] force-killing qwen server pid=%s" % pid)
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        os.remove(qwen_pidfile(port))
+    except OSError:
+        pass
+    return True
+
+
 _STAGE_PATTERNS = [
     (r"\[resident\] reusing service", "复用常驻服务(免冷启动)"),
     (r"\[lifecycle\] starting", "启动 ComfyUI(冷启动)"),
@@ -379,6 +450,9 @@ class Manager:
         self.driver = os.path.abspath(driver)
         self.image_driver = os.path.join(os.path.dirname(self.driver), "zimage_runner.py")
         self.qwen_driver = os.path.join(os.path.dirname(self.driver), "qwen_image_runner.py")
+        self.qwen_server = QWEN_SERVER
+        self.qwen_port = QWEN_PORT
+        self._qwen_proc = None
         self.password = password
         self.data = os.path.join(root, ".h3ref2v")
         self.jobs_dir = os.path.join(self.data, "jobs")
@@ -967,6 +1041,8 @@ class Manager:
                  "--megapixels", str(p["megapixels"]), "--steps", str(p["steps"]),
                  "--out", os.path.join(self._out_dir(mode, cfg.get("project")),
                                        "%s.png" % cfg["tag"])]
+            if cfg.get("model") == "qwen":
+                a[2:2] = ["--port", str(self.qwen_port)]
             if mode == "i2i":
                 a += ["--strength", str(p.get("strength", 0.6)),
                       "--init-image", cfg["media"]["init_image"]]
@@ -1017,9 +1093,13 @@ class Manager:
                     self._set(jid, "status", "cancelled", ended=NOW(), err="取消(等待中)")
                     return
             if mode in IMAGE_MODES and cfg.get("model") == "qwen":
-                log.write("[web] freeing ComfyUI VRAM for Qwen-Image-2.1\n"); log.flush()
-                if self.comfy.free_vram():
-                    self._wait_gpu_free(log)
+                log.write("[stage] load_model\n"); log.flush()
+                if not self._ensure_qwen(log):
+                    self._set(jid, "status", "failed", ended=NOW(),
+                              err="Qwen-Image-2.1 服务启动失败")
+                    log.write("[web] qwen server failed to start\n"); log.flush(); return
+            else:
+                self._stop_qwen(log)
             os.makedirs(self._out_dir(mode, cfg.get("project")), exist_ok=True)
             ext = "png" if mode in IMAGE_MODES else "mp4"
             out_path = os.path.join(self._out_dir(mode, cfg.get("project")), "%s.%s" % (cfg["tag"], ext))
@@ -1123,6 +1203,63 @@ class Manager:
             time.sleep(3)
         log.write("[web] VRAM wait timeout, proceeding\n"); log.flush()
         return False
+
+    def _qwen_proc_poll(self):
+        p = self._qwen_proc
+        if p is not None and p.poll() is not None:
+            self._qwen_proc = None
+
+    def _ensure_qwen(self, log):
+        """Start the resident Qwen service if needed; reuse it if it is already up."""
+        self._qwen_proc_poll()
+        if qwen_health(self.qwen_port):
+            log.write("[web] reusing resident Qwen-Image-2.1\n"); log.flush()
+            return True
+        log.write("[web] starting resident Qwen-Image-2.1\n"); log.flush()
+        self.comfy.free_vram()
+        self._wait_gpu_free(log, min_free_mb=20000)
+        os.makedirs(QWEN_CACHE, exist_ok=True)
+        try:
+            logf = open(qwen_logfile(self.qwen_port), "ab", buffering=0)
+            self._qwen_proc = subprocess.Popen(
+                [sys.executable, self.qwen_server, "--port", str(self.qwen_port)],
+                cwd=self.root, stdin=subprocess.DEVNULL, stdout=logf,
+                stderr=subprocess.STDOUT, start_new_session=True)
+        except Exception as e:
+            log.write("[web] qwen spawn failed: %s\n" % e); log.flush()
+            return False
+        t0 = time.time()
+        while time.time() - t0 < 240:
+            if qwen_health(self.qwen_port):
+                log.write("[web] Qwen-Image-2.1 ready (%.1fs)\n"
+                          % (time.time() - t0)); log.flush()
+                return True
+            pid = qwen_pid(self.qwen_port)
+            if pid:
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    log.write("[web] qwen server exited during load (see %s)\n"
+                              % qwen_logfile(self.qwen_port)); log.flush()
+                    self._qwen_proc = None
+                    return False
+            time.sleep(2)
+        log.write("[web] qwen server start timeout\n"); log.flush()
+        return False
+
+    def _stop_qwen(self, log):
+        """Release the resident Qwen service so ComfyUI can own the GPUs."""
+        self._qwen_proc_poll()
+        if not (qwen_pid(self.qwen_port) or qwen_health(self.qwen_port, 1)):
+            return
+        if stop_qwen_server(self.qwen_port, log=log):
+            if self._qwen_proc is not None:
+                try:
+                    self._qwen_proc.wait(timeout=10)
+                except Exception:
+                    pass
+                self._qwen_proc = None
+            self._wait_gpu_free(log, min_free_mb=16000, timeout_s=30)
 
     def _term(self, job):
         child = job.get("child")
@@ -4164,27 +4301,35 @@ def main():
     if a.stop:
         pid = read_pid()
         if not pid:
-            print("no pid file (nothing running?)"); sys.exit(1)
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            print("pid %d not alive" % pid)
-        for _ in range(50):
+            print("no pid file (nothing running?)")
+        else:
             try:
-                os.kill(pid, 0); time.sleep(0.2)
+                os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:
-                print("stopped pid %d" % pid)
+                print("pid %d not alive" % pid)
+            stopped = False
+            for _ in range(50):
                 try:
-                    os.remove(pidfile)
-                except OSError:
-                    pass
-                return
-        print("pid %d still alive after 10s" % pid); sys.exit(1)
+                    os.kill(pid, 0); time.sleep(0.2)
+                except ProcessLookupError:
+                    print("stopped pid %d" % pid)
+                    stopped = True
+                    try:
+                        os.remove(pidfile)
+                    except OSError:
+                        pass
+                    break
+            if not stopped:
+                print("pid %d still alive after 10s" % pid)
+        stop_qwen_server()
+        return
 
     if a.status:
         pid = read_pid()
         print("pid:", pid or "(none)")
         print("url: http://%s:%d/" % (a.host, a.port))
+        print("qwen:", ("resident (pid %s)" % qwen_pid()) if qwen_health(QWEN_PORT, 1)
+              else "stopped")
         if pid:
             try:
                 auth = base64.b64encode(("aiakos:" + a.password).encode()).decode()
