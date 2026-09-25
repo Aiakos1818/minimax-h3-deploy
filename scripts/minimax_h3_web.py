@@ -39,6 +39,8 @@ MATERIAL_MB = {"image": MAX_IMAGE_MB, "video": MAX_VIDEO_MB, "audio": MAX_AUDIO_
 MATERIAL_NAME_MAX = 60
 THUMB_MAX = 480
 PREVIEW_MAX = 1600
+IMG_ORIG_MAX = 800 * 1024
+IMG_THUMB_MAX_BYTES = 500 * 1024
 THUMB_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_thumb.py")
 VTHUMB_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_vthumb.py")
 MODES = ("t2v", "ref2v")
@@ -594,7 +596,12 @@ class Manager:
         return os.path.join(self._proj_dir(pid), "thumbs")
 
     def material_thumb(self, pid, fn, maxw=THUMB_MAX):
-        """Resolve a material image/video to a cached thumbnail or poster (else the original)."""
+        """Resolve a material image/video to a cached thumbnail or poster (else the original).
+
+        Images keep their original format: files up to IMG_ORIG_MAX are served
+        as-is, larger ones get a same-extension copy capped at IMG_THUMB_MAX_BYTES.
+        Videos still get a JPEG poster.
+        """
         src = self.material_file(pid, fn)
         if not src:
             return None
@@ -605,8 +612,23 @@ class Manager:
                 kind = m.get("kind"); break
         if kind not in ("image", "video"):
             return src
-        helper = THUMB_HELPER if kind == "image" else VTHUMB_HELPER
-        suffix = ".jpg" if maxw == THUMB_MAX else ".p%d.jpg" % maxw
+        if kind == "image":
+            ext = os.path.splitext(fn)[1].lower() or ".png"
+            for ls in (".jpg", ".webp", ".p%d.jpg" % PREVIEW_MAX, ".p%d.webp" % PREVIEW_MAX):
+                if ls != ext:
+                    try:
+                        os.remove(os.path.join(self._thumbs_dir(pid), fn + ls))
+                    except OSError:
+                        pass
+            try:
+                if os.path.getsize(src) <= IMG_ORIG_MAX:
+                    return src
+            except OSError:
+                return src
+            helper, cap = THUMB_HELPER, IMG_THUMB_MAX_BYTES
+        else:
+            ext, helper, cap = ".jpg", VTHUMB_HELPER, None
+        suffix = ext if maxw == THUMB_MAX else ".p%d%s" % (maxw, ext)
         dst = os.path.join(self._thumbs_dir(pid), fn + suffix)
         try:
             helper_mt = os.path.getmtime(helper) if os.path.isfile(helper) else 0
@@ -618,8 +640,10 @@ class Manager:
             return dst
         try:
             os.makedirs(self._thumbs_dir(pid), exist_ok=True)
-            subprocess.run([sys.executable, helper, src, dst, str(maxw)],
-                           check=True, timeout=90,
+            argv = [sys.executable, helper, src, dst, str(maxw)]
+            if cap:
+                argv.append(str(cap))
+            subprocess.run(argv, check=True, timeout=90,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             return src
