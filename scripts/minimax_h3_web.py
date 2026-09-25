@@ -543,12 +543,18 @@ class Manager:
                                               "created_ts": time.time()}
             self._write_project(self.projects[DEFAULT_PROJECT])
 
+    def _project_name_taken(self, name, exclude_pid=None):
+        return any(pid != exclude_pid and (p.get("name") or "") == name
+                   for pid, p in self.projects.items())
+
     def create_project(self, name):
         name = (name or "").strip()
         if not name:
             return None, "请填写项目名称"
         if len(name) > 60:
             return None, "项目名称过长（>60 字符）"
+        if self._project_name_taken(name):
+            return None, "已存在同名项目「%s」" % name
         pid = "p" + uuid.uuid4().hex[:8]
         p = {"id": pid, "name": name, "created_ts": time.time()}
         with self.lock:
@@ -566,6 +572,8 @@ class Manager:
             p = self.projects.get(pid)
             if not p:
                 return False, "项目不存在"
+            if self._project_name_taken(name, exclude_pid=pid):
+                return False, "已存在同名项目「%s」" % name
             p["name"] = name
             self._write_project(p)
         return True, "已重命名"
@@ -2895,7 +2903,7 @@ async function newProject(){
   const j=await r.json().catch(()=>({}));
   if(r.status===201){ $('newProjName').value=''; $('projMsg').textContent='已创建：'+j.name;
     await refreshProjects(); openProject(j.id); }
-  else $('projMsg').textContent='创建失败：'+(j.error||r.status);
+  else { $('projMsg').textContent=''; notice('创建失败：'+(j.error||r.status)); }
 }
 async function renameProject(){
   const p=projects.find(x=>x.id===curProject); if(!p) return;
