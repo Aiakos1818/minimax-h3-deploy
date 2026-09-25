@@ -2286,7 +2286,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
         <summary onclick="toggleSec(event)"><span class="setoggle">创作图片列表</span></summary>
         <div class="muted" id="imgStatus" style="margin-bottom:8px"></div>
         <div id="imgList"></div>
-        <div id="imgJobs" class="muted">暂无生成记录</div>
+        <div id="imgJobs"></div>
       </details>
     </div>
     <div class="statgrid">
@@ -3114,7 +3114,7 @@ function renderImageList(){
   const sig=list.map(m=>[m.id,m.name,m.gen,m.exists?1:0].join(',')).join('\n');
   if(box._sig===sig) return;
   box._sig=sig; box.innerHTML='';
-  if(!list.length){ box.innerHTML='<div class="matempty">还没有生成的图片素材，用上面的文生图 / 图生图生成。</div>'; return; }
+  if(!list.length){ box.innerHTML=''; return; }
   const pid=curProject;
   list.forEach(m=>{
     const nm=matSaveName(m), gen=GEN_CN[m.gen]||m.gen||'生成';
@@ -3145,7 +3145,7 @@ async function refreshImageJobs(){
     j.duration!=null?j.duration:'',j.material_id||'',j.err||'',j.mode||''].join(',')).join('\n');
   if(box._sig===sig){ updateUsedElapsed(); return; }
   box._sig=sig;
-  if(!jobs.length){ box.innerHTML='<span class="muted">暂无生成记录</span>'; return; }
+  if(!jobs.length){ box.innerHTML=''; return; }
   box.innerHTML='';
   jobs.forEach(j=>{
     jobsById[j.id]=j;
