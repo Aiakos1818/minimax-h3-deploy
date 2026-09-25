@@ -1699,7 +1699,7 @@ textarea{min-height:96px;resize:vertical}
 button.primary{width:100%;margin-top:14px;padding:12px;border:0;border-radius:9px;background:var(--acc);
        color:#fff;font-size:15px;font-weight:600;cursor:pointer}
 button.primary:disabled{opacity:.5;cursor:default}
-.headacts{display:flex;gap:10px;align-items:center;margin-left:auto}
+.headacts{display:flex;gap:10px;align-items:center}
 .headacts button{width:auto;min-width:76px;height:34px;margin:0;padding:0 16px;border-radius:8px;
         font-size:14px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center}
 .headacts button.primary{width:auto;padding:0 16px;font-size:14px}
@@ -1728,6 +1728,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .st.done{background:var(--ok);color:#0b0d11}.st.running{background:var(--acc);color:#fff}
 .st.failed,.st.cancelled,.st.interrupted{background:var(--err);color:#fff}.st.queued{background:var(--warn);color:#0b0d11}
 .job .meta{font-size:12px;color:var(--mut);flex:1;min-width:160px}
+.jobsacts{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .clips{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
 .clip{position:relative;background:#0e1116;border:1px solid var(--line);border-radius:10px;overflow:hidden;cursor:pointer}
 .clip video,.clip .ph{width:100%;aspect-ratio:16/9;background:#000;display:block;object-fit:cover}
@@ -1737,9 +1738,15 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
        font-size:14px;color:#fff}
 .clip.sel{outline:3px solid var(--acc);outline-offset:-3px}
 .clip.sel .pick{background:var(--acc);border-color:var(--acc)}
-.clipbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
-.clipbar .muted{margin-right:auto}
-details.sec>summary .editbtn{margin-left:auto}
+.sumacts{display:flex;gap:8px}
+.sumacts .editonly{display:none}
+.sumacts.editing .editonly{display:block}
+.sumacts.editing #clipGoBtn{display:none}
+#stClips>.sumacts button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+#stClips{position:relative}
+#stClips>details>summary{width:fit-content;margin-right:auto}
+#stClips>.sumacts{position:absolute;top:14px;right:14px}
+#stClips>details[open]>summary{margin-bottom:22px}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;align-items:center;justify-content:center;z-index:20;padding:12px}
 .modal.open{display:flex}
 .modal .box{width:min(960px,98vw);background:#0e1116;border:1px solid var(--line);border-radius:12px;padding:10px}
@@ -1826,11 +1833,13 @@ details.sec>summary .editbtn{margin-left:auto}
   #stCur{grid-area:cur}#stJobs{grid-area:jobs}#stClips{grid-area:clips}
   .editgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr);gap:14px}
   .editgrid>.card{margin-bottom:0}
+  #taskCard{position:relative}
+  #taskCard>.headacts{position:absolute;top:14px;right:14px}
 }
 @media(max-width:980px){.cols{grid-template-columns:1fr}
   #projHead .cardhead{flex-wrap:wrap}
   #projHead .cardhead h2{flex:1 1 100%}
-  .headacts{flex:1 1 100%;margin-left:0}
+  .headacts{margin-top:8px}
   .headacts button{flex:1 1 0;width:auto;min-width:0;height:42px;padding:0;font-size:15px}
   .headacts button.primary{width:auto;padding:0;font-size:15px}
 }
@@ -1838,8 +1847,12 @@ details.sec>summary .editbtn{margin-left:auto}
   .hdrright{margin-left:0}
   .params{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   .params>.grid3,.params>.grid2{display:contents}
-  .params .refsize{grid-column:1/-1}
   .params .fseed{order:5}
+  .cardhead.modehead{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .cardhead.modehead #mode{width:100%;min-width:0}
+  #stClips>.sumacts{gap:6px}
+  #stClips>.sumacts button{padding:6px 8px;font-size:12px}
+  .jobsacts{flex-basis:100%}
 }
 .docbody{color:var(--fg);font-size:14px;line-height:1.68}
 .docbody h1{font-size:22px;margin:4px 0 12px}
@@ -1895,17 +1908,13 @@ details.sec>summary .editbtn{margin-left:auto}
   </div>
   <div id="projView" style="display:none">
     <div class="card" id="projHead"></div>
-    <div class="card">
+    <div class="card" id="taskCard">
       <div class="cardhead modehead">
         <h2>新建任务</h2>
         <select id="mode" onchange="onModeChange()">
           <option value="t2v">文生视频</option>
           <option value="ref2v">参考生视频</option>
         </select>
-        <span class="headacts">
-          <button class="primary" id="submitBtn" onclick="submit()">提交</button>
-          <button class="ghost" onclick="resetForm()">重置</button>
-        </span>
       </div>
       <div class="progress" id="prog"><i></i></div>
       <div class="muted" id="submitMsg" style="margin-top:8px"></div>
@@ -1966,6 +1975,10 @@ details.sec>summary .editbtn{margin-left:auto}
         <div id="refImageSizeRow" class="refsize"><label>参考图缩放</label>
           <select id="ref_image_size"><option value="match">match(快)</option><option value="max">max(保真)</option></select></div>
       </div>
+      <div class="headacts">
+        <button class="primary" id="submitBtn" onclick="submit()">提交</button>
+        <button class="ghost" onclick="resetForm()">重置</button>
+      </div>
     </div>
     <div class="card" id="matCard">
       <div class="cardhead"><h2>素材库</h2><span class="muted" id="matSub"></span></div>
@@ -1994,15 +2007,15 @@ details.sec>summary .editbtn{margin-left:auto}
       </div>
       <div class="card" id="stClips">
         <details class="sec" open>
-          <summary>产物<button class="ghost editbtn" id="clipEditBtn" onclick="event.preventDefault();event.stopPropagation();toggleClipEdit()">编辑</button></summary>
-          <div id="clipBar" class="clipbar" style="display:none">
-            <span class="muted" id="clipCount">已选 0</span>
-            <button class="ghost" onclick="clipSelectAll()">全选</button>
-            <button class="ghost" onclick="clipSelectNone()">取消全选</button>
-            <button class="ghost" style="color:var(--err)" onclick="clipDelete()">删除</button>
-          </div>
+          <summary>产物 <span class="muted" id="clipCount"></span></summary>
           <div id="clips" class="clips"></div>
         </details>
+        <span class="sumacts">
+          <button class="ghost" id="clipGoBtn" onclick="openEdit()">剪辑</button>
+          <button class="ghost editonly" id="clipSelAllBtn" onclick="clipToggleAll()">全选</button>
+          <button class="ghost editonly" style="color:var(--err)" onclick="clipDelete()">删除</button>
+          <button class="ghost" id="clipEditBtn" onclick="toggleClipEdit()">编辑</button>
+        </span>
       </div>
     </div>
   </div>
@@ -2196,7 +2209,7 @@ function renderProjHead(){
   const p=projects.find(x=>x.id===curProject); if(!p){ return; }
   const canEdit=(curProject!=='default');
   $('projHead').innerHTML='<div class="cardhead"><h2 style="color:var(--fg);font-size:16px">'+esc(p.name)+'</h2>'+
-    '<span class="bcbar"><button class="ghost" onclick="openEdit()">剪辑</button>'+
+    '<span class="bcbar">'+
       (canEdit?'<button class="ghost" onclick="renameProject()">改名</button>'+
       '<button class="ghost" onclick="deleteProject()">删除</button>':'')+
       '<button class="ghost" onclick="goHome()">全部项目</button></span></div>'+
@@ -2216,7 +2229,7 @@ function route(){
       $('clips')._sig=null; $('clips').innerHTML='';
       jobsById={}; clipsCache=[]; clipSel.clear(); lastJob=null; logOffset=0; $('log').textContent='';
       clearSelMat(); materials=[]; $('matGrid').innerHTML='';
-      if(clipEdit){ clipEdit=false; $('clipBar').style.display='none'; $('clipEditBtn').textContent='编辑'; } }
+      if(clipEdit){ clipEdit=false; document.querySelector('#stClips .sumacts').classList.remove('editing'); $('clipEditBtn').textContent='编辑'; } }
     $('homeView').style.display='none';
     $('projView').style.display=edit?'none':'';
     $('editView').style.display=edit?'':'none';
@@ -2834,7 +2847,8 @@ async function refreshJobs(){
     if(j.clip_rel) acts+=' <button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看</button>';
     acts+=' <button class="ghost" onclick="reuseJob(\''+j.id+'\')">复用</button>';
     d.innerHTML='<span class="'+stCls(j.status)+'">'+(STATUS_CN[j.status]||j.status)+'</span>'+
-      '<span class="meta"><b>'+j.id+'</b><br>'+line2+'<br>'+(note||j.created||'')+'</span>'+acts;
+      '<span class="meta"><b>'+j.id+'</b><br>'+line2+'<br>'+(note||j.created||'')+'</span>'+
+      '<span class="jobsacts">'+acts+'</span>';
     box.appendChild(d);
   });
 }
@@ -2866,7 +2880,15 @@ async function refreshOutputs(){
   });
 }
 
-function updClipBar(){ $('clipCount').textContent='已选 '+clipSel.size; }
+function updClipBar(){
+  const c=$('clipCount'); if(c) c.textContent=clipEdit?('已选 '+clipSel.size):'';
+  const b=$('clipSelAllBtn');
+  if(b){
+    const all=clipsCache.length>0 && clipsCache.every(x=>clipSel.has(x.rel));
+    b.textContent=all?'取消全选':'全选';
+    b.classList.toggle('on',all);
+  }
+}
 function applyClipEditUI(){
   $('clips').querySelectorAll('.clip').forEach(el=>{
     if(clipEdit){
@@ -2885,7 +2907,7 @@ function applyClipEditUI(){
 }
 function toggleClipEdit(){
   clipEdit=!clipEdit; clipSel.clear();
-  $('clipBar').style.display=clipEdit?'flex':'none';
+  document.querySelector('#stClips .sumacts').classList.toggle('editing',clipEdit);
   $('clipEditBtn').textContent=clipEdit?'完成':'编辑';
   applyClipEditUI(); updClipBar();
 }
@@ -2903,8 +2925,11 @@ function syncClipSel(){
   });
   updClipBar();
 }
-function clipSelectAll(){ clipsCache.forEach(c=>clipSel.add(c.rel)); syncClipSel(); }
-function clipSelectNone(){ clipSel.clear(); syncClipSel(); }
+function clipToggleAll(){
+  if(clipsCache.length && clipsCache.every(c=>clipSel.has(c.rel))) clipSel.clear();
+  else clipsCache.forEach(c=>clipSel.add(c.rel));
+  syncClipSel();
+}
 function removeClipsLocal(rels){
   const gone=new Set(rels);
   $('clips').querySelectorAll('.clip').forEach(el=>{ if(gone.has(el.dataset.rel)) el.remove(); });
