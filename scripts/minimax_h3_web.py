@@ -26,6 +26,14 @@ FPS = 24
 MAX_IMAGES, MAX_VIDEOS, MAX_AUDIOS = 9, 3, 3
 MEDIA_KINDS = ("ref_image", "ref_video", "ref_audio")
 FRAME_KINDS = ("first_frame", "last_frame")
+MATERIAL_EXTS = {".png": "image", ".jpg": "image", ".jpeg": "image", ".webp": "image",
+                 ".bmp": "image", ".gif": "image",
+                 ".mp4": "video", ".mov": "video", ".webm": "video", ".mkv": "video",
+                 ".avi": "video",
+                 ".mp3": "audio", ".wav": "audio", ".m4a": "audio", ".aac": "audio",
+                 ".flac": "audio", ".ogg": "audio"}
+MATERIAL_KIND_CN = {"image": "图片", "video": "视频", "audio": "音频"}
+MATERIAL_NAME_MAX = 60
 MODES = ("t2v", "ref2v")
 OUT_SUBDIRS = {"t2v": "t2v", "ref2v": "ref2v", "edit": "edit"}
 TRANSITIONS = ("cut", "fade", "dissolve", "push")
@@ -128,12 +136,6 @@ def aspect_ratio(s):
         return max(0.0, float(s))
     except (ValueError, ZeroDivisionError):
         return 0.0
-
-
-def _safe_name(name):
-    name = os.path.basename(name.replace("\\", "/"))
-    name = re.sub(r"[^\w.\- ]", "_", name)
-    return name or "file"
 
 
 def _first(fields, key, default=None):
@@ -382,6 +384,7 @@ class Manager:
                 p["id"] = d
                 p.setdefault("name", d)
                 p.setdefault("created_ts", os.path.getmtime(pf))
+                p.setdefault("materials", [])
                 self.projects[d] = p
             except Exception:
                 continue
@@ -488,6 +491,119 @@ class Manager:
             lst = [self.project_info(pid) for pid in self.projects]
         lst.sort(key=lambda x: (x["id"] != DEFAULT_PROJECT, -(x.get("created_ts") or 0)))
         return lst
+
+    # ---- materials (per-project asset library) ----
+    def _materials_dir(self, pid):
+        return os.path.join(self._proj_dir(pid), "materials")
+
+    def materials_list(self, pid):
+        p = self.projects.get(pid)
+        if not p:
+            return []
+        d = self._materials_dir(pid)
+        out = []
+        for m in p.get("materials") or []:
+            if not isinstance(m, dict) or not m.get("file"):
+                continue
+            out.append({"id": m.get("id"), "name": m.get("name") or "",
+                        "kind": m.get("kind") or "image", "file": m.get("file"),
+                        "size": m.get("size") or 0, "ts": m.get("ts"),
+                        "exists": os.path.isfile(os.path.join(d, m["file"]))})
+        return out
+
+    def material_path(self, pid, mid):
+        p = self.projects.get(pid)
+        if not p or not mid:
+            return None
+        for m in p.get("materials") or []:
+            if isinstance(m, dict) and m.get("id") == mid and m.get("file"):
+                fp = os.path.join(self._materials_dir(pid), m["file"])
+                return fp if os.path.isfile(fp) else None
+        return None
+
+    def material_file(self, pid, fn):
+        """Resolve a stored material filename to an absolute path (no traversal)."""
+        p = self.projects.get(pid)
+        if not p or not fn or fn != os.path.basename(fn):
+            return None
+        base = os.path.realpath(self._materials_dir(pid))
+        cand = os.path.realpath(os.path.join(base, fn))
+        if cand.startswith(base + os.sep) and os.path.isfile(cand):
+            return cand
+        return None
+
+    def _mat_name_ok(self, name):
+        name = (name or "").strip()
+        if not name:
+            return None, "请填写素材名称"
+        if len(name) > MATERIAL_NAME_MAX:
+            return None, "素材名称过长（>%d 字符）" % MATERIAL_NAME_MAX
+        if "/" in name or "\\" in name:
+            return None, "素材名称不能包含斜杠"
+        return name, None
+
+    def add_material(self, pid, name, filename, content):
+        name, err = self._mat_name_ok(name)
+        if err:
+            return None, err
+        ext = os.path.splitext(filename or "")[1].lower()
+        kind = MATERIAL_EXTS.get(ext)
+        if not kind:
+            return None, "不支持的文件类型：%s" % (ext or "未知")
+        if not content:
+            return None, "文件内容为空"
+        mid = "m" + uuid.uuid4().hex[:8]
+        stored = mid + ext
+        with self.lock:
+            p = self.projects.get(pid)
+            if not p:
+                return None, "项目不存在"
+            if any((m.get("name") or "") == name for m in (p.get("materials") or [])):
+                return None, "素材名称「%s」已存在" % name
+            d = self._materials_dir(pid)
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, stored), "wb") as f:
+                f.write(content)
+            mat = {"id": mid, "name": name, "kind": kind, "file": stored,
+                   "size": len(content), "ts": NOW()}
+            p.setdefault("materials", []).append(mat)
+            self._write_project(p)
+        return mat, None
+
+    def rename_material(self, pid, mid, name):
+        name, err = self._mat_name_ok(name)
+        if err:
+            return False, err
+        with self.lock:
+            p = self.projects.get(pid)
+            if not p:
+                return False, "项目不存在"
+            for m in p.get("materials") or []:
+                if isinstance(m, dict) and m.get("id") == mid:
+                    if any(o is not m and (o.get("name") or "") == name
+                           for o in p.get("materials") or []):
+                        return False, "素材名称「%s」已存在" % name
+                    m["name"] = name
+                    self._write_project(p)
+                    return True, "已重命名"
+        return False, "素材不存在"
+
+    def delete_material(self, pid, mid):
+        with self.lock:
+            p = self.projects.get(pid)
+            if not p:
+                return False, "项目不存在"
+            mats = p.get("materials") or []
+            for i, m in enumerate(mats):
+                if isinstance(m, dict) and m.get("id") == mid:
+                    del mats[i]
+                    self._write_project(p)
+                    try:
+                        os.remove(os.path.join(self._materials_dir(pid), m.get("file") or ""))
+                    except OSError:
+                        pass
+                    return True, "已删除素材"
+        return False, "素材不存在"
 
     # ---- persistence ----
     def _job_dir(self, jid):
@@ -1257,6 +1373,11 @@ def make_handler(mgr):
             elif u.path == "/api/outputs":
                 proj = parse_qs(u.query).get("project", [None])[0] or None
                 self._json(200, mgr.clips_list(proj))
+            elif u.path == "/api/materials":
+                proj = parse_qs(u.query).get("project", [None])[0] or None
+                if not proj or proj not in mgr.projects:
+                    self._err(400, "项目不存在"); return
+                self._json(200, {"project": proj, "materials": mgr.materials_list(proj)})
             elif u.path == "/api/sequence":
                 proj = parse_qs(u.query).get("project", [None])[0] or None
                 if not proj or proj not in mgr.projects:
@@ -1273,6 +1394,13 @@ def make_handler(mgr):
                     self._err(403, "bad path"); return
                 if not os.path.isfile(cand):
                     self._err(404, "file not found"); return
+                self._send_file_range(cand)
+            elif u.path.startswith("/material/"):
+                rest = u.path[len("/material/"):]
+                pid, _, fn = rest.partition("/")
+                cand = mgr.material_file(pid, unquote(fn)) if fn else None
+                if not cand:
+                    self._err(404, "not found"); return
                 self._send_file_range(cand)
             else:
                 m = _OUTPUT_RE.match(u.path)
@@ -1313,6 +1441,21 @@ def make_handler(mgr):
                     self._json(200 if ok else 400, {"ok": ok, "msg": msg}); return
                 ok, msg = mgr.delete_project(pid, js.get("mode") or "detach")
                 self._json(200 if ok else 409, {"ok": ok, "msg": msg}); return
+            matm = re.match(r"^/api/materials/([^/]+)/([^/]+)/(rename|delete)$", u.path)
+            if matm:
+                pid, mid, action = matm.group(1), matm.group(2), matm.group(3)
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    js = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                except Exception:
+                    self._err(400, "bad json"); return
+                if action == "rename":
+                    ok, msg = mgr.rename_material(pid, mid, js.get("name"))
+                else:
+                    ok, msg = mgr.delete_material(pid, mid)
+                self._json(200 if ok else 409, {"ok": ok, "msg": msg,
+                                                "materials": mgr.materials_list(pid)})
+                return
             if u.path in ("/api/sequence", "/api/edit/render", "/api/edit/delete"):
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
@@ -1378,6 +1521,37 @@ def make_handler(mgr):
                 ok, text = llm_optimize(prompt, js.get("counts") or {})
                 self._json(200, {"ok": True, "text": text}) if ok else self._err(502, text)
                 return
+            if u.path == "/api/materials":
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    if length <= 0:
+                        self._err(400, "empty body"); return
+                    if length > UPLOAD_MAX:
+                        self._err(413, "body too large (>2GiB)"); return
+                    body = self.rfile.read(length)
+                except Exception as e:
+                    self._err(400, "read body failed: %r" % e); return
+                ct = self.headers.get("Content-Type", "")
+                bm = re.search(r'boundary="?([^";]+)"?', ct)
+                if not (ct.startswith("multipart/form-data") and bm):
+                    self._err(400, "expected multipart/form-data"); return
+                try:
+                    fields, files = parse_multipart(body, bm.group(1).encode("ascii"))
+                except ValueError as e:
+                    self._err(400, str(e)); return
+                pid = (_first(fields, "project", "") or "").strip()
+                if pid not in mgr.projects:
+                    self._err(400, "项目不存在"); return
+                f = files[0] if files else None
+                if not f:
+                    self._err(400, "请选择要上传的文件"); return
+                mat, err = mgr.add_material(pid, _first(fields, "name", "") or "",
+                                            f.get("filename"), f.get("content") or b"")
+                if err:
+                    self._err(400, err); return
+                self._json(201, {"ok": True, "material": mat,
+                                 "materials": mgr.materials_list(pid)})
+                return
             if u.path != "/api/run":
                 self._err(404, "not found"); return
             try:
@@ -1409,14 +1583,12 @@ def make_handler(mgr):
             mode = _first(fields, "mode", "ref2v")
             if mode not in MODES:
                 mode = "ref2v"
-            by_kind = {k: [] for k in MEDIA_KINDS}
-            frames = {}
-            for f in files:
-                if f["name"] in by_kind:
-                    by_kind[f["name"]].append(f)
-                elif f["name"] in FRAME_KINDS:
-                    frames[f["name"]] = f
-            n = {k: len(v) for k, v in by_kind.items()}
+            project = _first(fields, "project", DEFAULT_PROJECT) or DEFAULT_PROJECT
+            if project not in mgr.projects:
+                self._err(400, "项目不存在"); return
+            ids = {k: [x for x in (fields.get(k) or []) if x] for k in MEDIA_KINDS}
+            frame_ids = {k: (_first(fields, k) or None) for k in FRAME_KINDS}
+            n = {k: len(v) for k, v in ids.items()}
             if mode == "ref2v":
                 if n["ref_image"] > MAX_IMAGES:
                     self._err(400, "参考图最多 %d 张" % MAX_IMAGES); return
@@ -1425,15 +1597,35 @@ def make_handler(mgr):
                 if n["ref_audio"] > MAX_AUDIOS:
                     self._err(400, "参考音频最多 %d 段" % MAX_AUDIOS); return
                 if not any(n.values()):
-                    self._err(400, "请至少上传一张参考图/视频/音频"); return
-                if frames:
+                    self._err(400, "请至少选择一张参考图/视频/音频"); return
+                if any(frame_ids.values()):
                     self._err(400, "参考生视频不支持首/尾帧"); return
             elif any(n.values()):
                 self._err(400, "文生视频不支持参考素材"); return
-
-            project = _first(fields, "project", DEFAULT_PROJECT) or DEFAULT_PROJECT
-            if project not in mgr.projects:
-                self._err(400, "项目不存在"); return
+            media = {}
+            for kind in MEDIA_KINDS:
+                paths = []
+                for ref in ids[kind]:
+                    if kind == "ref_video" and ref.startswith("clip:"):
+                        rel = mgr._valid_clip(ref[len("clip:"):])
+                        if not rel:
+                            self._err(400, "产物不存在或不可用：%s" % ref[len("clip:"):]); return
+                        paths.append(os.path.join(mgr.out_root, rel))
+                        continue
+                    fp = mgr.material_path(project, ref)
+                    if not fp:
+                        self._err(400, "素材不存在或已被删除：%s" % ref); return
+                    paths.append(fp)
+                media[kind] = paths
+            for kind in FRAME_KINDS:
+                mid = frame_ids[kind]
+                if not mid:
+                    media[kind] = []
+                    continue
+                fp = mgr.material_path(project, mid)
+                if not fp:
+                    self._err(400, "素材不存在或已被删除：%s" % mid); return
+                media[kind] = [fp]
             seed = _to_int(_first(fields, "seed"), None, lo=0, hi=2**63 - 1)
             if seed is None:
                 seed = random.randint(0, 2**63 - 1)
@@ -1451,33 +1643,11 @@ def make_handler(mgr):
                     "steps": _to_int(_first(fields, "steps"), 8, lo=1, hi=50),
                     "ref_image_size": "max" if _first(fields, "ref_image_size") == "max" else "match",
                 },
-                "media": {},
+                "media": media,
             }
             jid = mgr.new_id()
             cfg["tag"] = jid
-            jdir = mgr._job_dir(jid)
-            os.makedirs(jdir, exist_ok=True)
-            up_dir = os.path.join(jdir, "uploads")
-            os.makedirs(up_dir, exist_ok=True)
-            for kind in MEDIA_KINDS:
-                paths = []
-                for i, f in enumerate(by_kind[kind]):
-                    safe = _safe_name(f["filename"])
-                    dst = os.path.join(up_dir, "%s_%02d_%s" % (kind, i, safe))
-                    with open(dst, "wb") as wf:
-                        wf.write(f["content"])
-                    paths.append(dst)
-                cfg["media"][kind] = paths
-            for kind in FRAME_KINDS:
-                f = frames.get(kind)
-                if not f:
-                    cfg["media"][kind] = []
-                    continue
-                safe = _safe_name(f["filename"])
-                dst = os.path.join(up_dir, "%s_%s" % (kind, safe))
-                with open(dst, "wb") as wf:
-                    wf.write(f["content"])
-                cfg["media"][kind] = [dst]
+            os.makedirs(mgr._job_dir(jid), exist_ok=True)
             mgr.submit(cfg, jid=jid)
             self._json(202, {"id": jid, "status": "queued"})
 
@@ -1593,6 +1763,30 @@ details.sec>summary .editbtn{margin-left:auto}
        border-radius:8px;border:1px solid var(--line)}
 .medialist{display:block;margin-top:6px}
 .medialist audio{width:100%;display:block;margin-top:6px}
+.matup{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.matup #matName{flex:1 1 240px;min-width:0}
+.matup #matFile{flex:1 1 260px;min-width:0;padding:7px 10px;font-size:13px}
+.matgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:12px}
+.matcard{background:#0e1116;border:1px solid var(--line);border-radius:10px;overflow:hidden;
+         display:flex;flex-direction:column;position:relative}
+.matcard.pick{cursor:pointer}
+.matcard.pick:hover{border-color:var(--acc)}
+.matcard.sel{outline:3px solid var(--acc);outline-offset:-3px}
+.matcard .thumb{width:100%;aspect-ratio:16/9;background:#000;object-fit:cover;display:block}
+.matcard .thumbicon{width:100%;aspect-ratio:16/9;background:#0a0c11;display:flex;align-items:center;
+        justify-content:center;color:var(--mut);font-size:12px;letter-spacing:.05em}
+.matcard .mb{padding:7px 9px 4px;flex:1;min-width:0}
+.matcard .nm{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.matcard .mm{font-size:11px;color:var(--mut);margin-top:2px}
+.matcard .ma{display:flex;gap:6px;padding:0 9px 9px}
+.matcard .ma button{flex:1 1 0;background:#20242d;border:1px solid var(--line);color:var(--fg);
+        border-radius:6px;padding:4px 0;font-size:12px;cursor:pointer}
+.matcard .ma button.rm{color:var(--err)}
+.matcard .picktag{position:absolute;top:6px;right:6px;width:20px;height:20px;border-radius:6px;
+        background:rgba(0,0,0,.6);border:2px solid #fff;display:flex;align-items:center;justify-content:center;
+        font-size:12px;color:#fff}
+.matcard.sel .picktag{background:var(--acc);border-color:var(--acc)}
+.matempty{color:var(--mut);font-size:13px;margin-top:10px}
 .detprompt{background:#0b0e13;border:1px solid var(--line);border-radius:8px;padding:8px;font-size:13px;
        white-space:pre-wrap;word-break:break-word;max-height:200px;overflow:auto;line-height:1.55}
 .detrow{display:flex;gap:10px;font-size:13px;padding:2px 0}
@@ -1702,17 +1896,33 @@ details.sec>summary .editbtn{margin-left:auto}
         <div class="fcol">
           <div id="t2vBox">
             <label>首帧（可选，单张图片）</label>
-            <div class="filebox"><input id="fFirst" type="file" accept="image/*"><ul id="lFirst"></ul></div>
+            <div class="filebox">
+              <button type="button" class="ghost" onclick="openPick('first_frame')">选择素材</button>
+              <ul id="lFirst"></ul>
+            </div>
             <label>尾帧（可选，单张图片）</label>
-            <div class="filebox"><input id="fLast" type="file" accept="image/*"><ul id="lLast"></ul></div>
+            <div class="filebox">
+              <button type="button" class="ghost" onclick="openPick('last_frame')">选择素材</button>
+              <ul id="lLast"></ul>
+            </div>
           </div>
           <div id="ref2vBox">
             <label>参考图（≤9）</label>
-            <div class="filebox"><input id="fImg" type="file" accept="image/*" multiple><ul id="lImg"></ul></div>
+            <div class="filebox">
+              <button type="button" class="ghost" onclick="openPick('ref_image')">选择素材</button>
+              <ul id="lImg"></ul>
+            </div>
             <label>参考视频（≤3，每段 2–15s，合计 ≤15s）</label>
-            <div class="filebox"><input id="fVid" type="file" accept="video/*" multiple><ul id="lVid"></ul></div>
+            <div class="filebox">
+              <button type="button" class="ghost" onclick="openPick('ref_video')">选择素材</button>
+              <button type="button" class="ghost" style="margin-left:6px" onclick="openPick('ref_video','clip')">选择产物</button>
+              <ul id="lVid"></ul>
+            </div>
             <label>参考音频（≤3，合计 ≤15s）</label>
-            <div class="filebox"><input id="fAud" type="file" accept="audio/*" multiple><ul id="lAud"></ul></div>
+            <div class="filebox">
+              <button type="button" class="ghost" onclick="openPick('ref_audio')">选择素材</button>
+              <ul id="lAud"></ul>
+            </div>
           </div>
         </div>
       </div>
@@ -1740,6 +1950,16 @@ details.sec>summary .editbtn{margin-left:auto}
       </div>
       <div class="progress" id="prog"><i></i></div>
       <div class="muted" id="submitMsg" style="margin-top:8px"></div>
+    </div>
+    <div class="card" id="matCard">
+      <div class="cardhead"><h2>素材库</h2><span class="muted" id="matSub"></span></div>
+      <div class="matup">
+        <input id="matName" placeholder="素材名称（项目内唯一）" onkeydown="if(event.key==='Enter'){event.preventDefault();uploadMaterial()}">
+        <input id="matFile" type="file" accept="image/*,video/*,audio/*">
+        <button type="button" class="ghost" onclick="uploadMaterial()">上传素材</button>
+      </div>
+      <div class="muted" id="matMsg" style="margin-top:6px"></div>
+      <div id="matGrid" class="matgrid"></div>
     </div>
     <div class="statgrid">
       <div class="card" id="stCur">
@@ -1811,6 +2031,17 @@ details.sec>summary .editbtn{margin-left:auto}
     </div>
   </div>
 </main>
+<div class="modal" id="pickModal" onclick="if(event.target===this)closePick()">
+  <div class="box" style="width:min(900px,98vw);max-height:88vh;overflow:auto">
+    <div class="optrow"><b id="pickTitle">选择素材</b><button class="ghost" onclick="closePick()">关闭</button></div>
+    <div class="muted" id="pickHint" style="margin-bottom:8px"></div>
+    <div id="pickGrid" class="matgrid"></div>
+    <div class="optacts">
+      <button class="ghost" onclick="closePick()">取消</button>
+      <button class="primary" id="pickOk" onclick="pickOk()">加入</button>
+    </div>
+  </div>
+</div>
 <div class="modal" id="modal" onclick="if(event.target===this)closeModal()">
   <div class="box">
     <video id="mvideo" controls playsinline webkit-playsinline></video>
@@ -1890,6 +2121,17 @@ let logOffset = 0, lastJob = null, jobsById = {}, curStart = 0, curRunning = fal
 let projects = [], projNames = {}, curProject = null, projectsLoaded = false;
 let clipEdit = false, clipSel = new Set(), clipsCache = [];
 let editSeq={aspect:'0',fade_in:0,fade_out:0,clips:[]}, editAvail=[], editLast=null, editLogOff=0;
+let materials=[], pickKind=null, pickSel=new Set(), pickSingle=false, pickMode='mat';
+const selMat={ref_image:[],ref_video:[],ref_audio:[],first_frame:[],last_frame:[]};
+const selClip={ref_image:[],ref_video:[],ref_audio:[],first_frame:[],last_frame:[]};
+const SLOT_CN={ref_image:{cn:'图片',prefix:'Picture',list:'lImg'},
+               ref_video:{cn:'视频',prefix:'Video',list:'lVid'},
+               ref_audio:{cn:'音频',prefix:'Audio',list:'lAud'},
+               first_frame:{cn:'首帧',prefix:null,list:'lFirst'},
+               last_frame:{cn:'尾帧',prefix:null,list:'lLast'}};
+const SLOT_MEDIA={ref_image:'image',ref_video:'video',ref_audio:'audio',
+                  first_frame:'image',last_frame:'image'};
+const MAT_KIND_CN={image:'图片',video:'视频',audio:'音频'};
 const STATUS_CN = {queued:'排队中', running:'进行中', done:'已完成', failed:'失败', cancelled:'已取消', interrupted:'已中断'};
 const MEDIA_CN = {ref_image:'图', ref_video:'视频', ref_audio:'音频'};
 const MODE_CN = {t2v:'文生视频', ref2v:'参考生视频', edit:'剪辑成片'};
@@ -1948,11 +2190,13 @@ function route(){
       $('jobs')._sig=null; $('jobs').innerHTML='';
       $('clips')._sig=null; $('clips').innerHTML='';
       jobsById={}; clipsCache=[]; clipSel.clear(); lastJob=null; logOffset=0; $('log').textContent='';
+      clearSelMat(); materials=[]; $('matGrid').innerHTML='';
       if(clipEdit){ clipEdit=false; $('clipBar').style.display='none'; $('clipEditBtn').textContent='编辑'; } }
     $('homeView').style.display='none';
     $('projView').style.display=edit?'none':'';
     $('editView').style.display=edit?'':'none';
     renderProjHead();
+    refreshMaterials();
     if(edit){ refreshEdit(); } else { refreshJobs(); refreshOutputs(); }
   }else{
     curProject=null;
@@ -2030,8 +2274,15 @@ function askInput(title,value,okText,ph){
   });
 }
 function inputResolve(v){ $('inputModal').classList.remove('open'); const cb=inputCb; inputCb=null; if(cb) cb(v); }
-function mediaUrl(jid,p){ return '/media/'+encodeURIComponent(jid)+'/'+encodeURIComponent(String(p).split('/').pop()); }
-function mediaSection(jid,m){
+function matUrl(pid,file){ return '/material/'+encodeURIComponent(pid)+'/'+encodeURIComponent(String(file).split('/').pop()); }
+function mediaUrl(jid,pid,p){
+  p=String(p);
+  if(pid && p.indexOf('/materials/')>=0) return matUrl(pid,p);
+  const oi=p.indexOf('/output/');
+  if(oi>=0) return '/files/'+encodeURI(p.slice(oi+8));
+  return '/media/'+encodeURIComponent(jid)+'/'+encodeURIComponent(p.split('/').pop());
+}
+function mediaSection(jid,m,pid){
   const groups=[['ref_image','参考图','img'],['ref_video','参考视频','video'],
                 ['ref_audio','参考音频','audio'],['first_frame','首帧','img'],['last_frame','尾帧','img']];
   let h='';
@@ -2040,7 +2291,7 @@ function mediaSection(jid,m){
     h+='<div style="margin-top:12px"><div class="muted">'+label+' ('+arr.length+')</div>'+
        '<div class="'+(kind==='audio'?'medialist':'mediagrid')+'">';
     arr.forEach(p=>{
-      const u=mediaUrl(jid,p);
+      const u=mediaUrl(jid,pid,p);
       if(kind==='img') h+='<img src="'+u+'" loading="lazy">';
       else if(kind==='video') h+='<video controls preload="metadata" playsinline src="'+u+'"></video>';
       else h+='<audio controls preload="metadata" src="'+u+'"></audio>';
@@ -2069,7 +2320,7 @@ function showJob(id){
   h+=row('分辨率', p.megapixels!=null? p.megapixels+' MP':'-');
   if(j.status==='failed' && j.err) h+=row('错误', '<span style="color:var(--err)">'+esc(friendlyErr(j.err))+'</span>');
   h+='<div style="margin-top:12px"><div class="muted">提示词</div><div class="detprompt">'+esc(p.prompt||'')+'</div></div>';
-  h+=mediaSection(id,m);
+  h+=mediaSection(id,m,j.project);
   $('jBody').innerHTML=h;
   bindSinglePlay($('jBody'));
   $('jobModal').classList.add('open');
@@ -2091,21 +2342,28 @@ async function reuseJob(id){
   if(p.megapixels!=null) $('megapixels').value=p.megapixels;
   if(p.ref_image_size) $('ref_image_size').value=p.ref_image_size;
   $('seed').value='';   // 复用不沿用原 seed，留空=随机，避免复现成同样的视频
-  getImg.set([]); getVid.set([]); getAud.set([]); getFirst.set(null); getLast.set(null);
-  const load=async(kind,setter)=>{
-    const files=[];
+  await refreshMaterials();
+  await refreshOutputs();
+  clearSelMat();
+  const match=(kind)=>{
+    const ids=[], cls=[];
     for(const path of (m[kind]||[])){
-      try{
-        const b=await (await fetch(mediaUrl(id,path))).blob();
-        files.push(new File([b],String(path).split('/').pop(),{type:b.type||''}));
-      }catch(e){}
+      const fn=String(path).split('/').pop();
+      const mt=materials.find(x=>x.file===fn);
+      if(mt){ ids.push(mt.id); continue; }
+      const c=clipsCache.find(x=>x.name===fn);
+      if(c) cls.push(c.rel);
     }
-    if(kind==='first_frame'||kind==='last_frame') setter.set(files[0]||null); else setter.set(files);
+    selMat[kind]=ids; selClip[kind]=cls;
   };
-  await load('ref_image',getImg); await load('ref_video',getVid); await load('ref_audio',getAud);
-  await load('first_frame',getFirst); await load('last_frame',getLast);
+  ['ref_image','ref_video','ref_audio','first_frame','last_frame'].forEach(match);
+  renderAllSlots();
+  let lost=Object.keys(m).some(k=>Array.isArray(m[k]) && m[k].length && m[k].some(p=>{
+    const fn=String(p).split('/').pop();
+    return !materials.some(x=>x.file===fn) && !clipsCache.some(x=>x.name===fn);
+  }));
   window.scrollTo({top:0,behavior:'smooth'});
-  $('submitMsg').textContent='已复用任务 '+id+'（未提交）';
+  $('submitMsg').textContent='已复用任务 '+id+(lost?'（部分素材已不在素材库/产物中，已跳过）':'（未提交）');
 }
 function friendlyErr(e){
   if(!e) return '';
@@ -2176,58 +2434,179 @@ function insertRef(prefix, idx){
   ta.value=ta.value.slice(0,s)+tag+ta.value.slice(e);
   const pos=s+tag.length; ta.focus(); ta.setSelectionRange(pos,pos);
 }
-function bindFiles(inputId, listId, max, cn, prefix){
-  const input=$(inputId), list=$(listId); let files=[];
-  function render(){
-    list.innerHTML='';
-    files.forEach((f,i)=>{
-      const li=document.createElement('li');
-      const nm=document.createElement('span'); nm.className='fname'; nm.textContent=f.name;
-      const acts=document.createElement('span'); acts.className='acts';
-      const chip=document.createElement('button'); chip.className='chip'; chip.textContent=cn+(i+1);
-      chip.title='插入引用 <'+prefix+' '+(i+1)+'>';
-      chip.onclick=()=>insertRef(prefix,i);
-      const rm=document.createElement('button'); rm.className='rm'; rm.textContent='移除';
-      rm.onclick=()=>{files.splice(i,1); input.value=''; render();};
-      acts.appendChild(chip); acts.appendChild(rm);
-      li.appendChild(nm); li.appendChild(acts); list.appendChild(li);
+
+// ---- material library ----
+function clearSelMat(){
+  for(const k in selMat) selMat[k]=[];
+  for(const k in selClip) selClip[k]=[];
+  renderAllSlots();
+}
+function matById(id){ return materials.find(m=>m.id===id)||null; }
+function renderSlot(kind){
+  const cfg=SLOT_CN[kind], list=$(cfg.list); if(!list) return;
+  const mats=selMat[kind].map(matById).filter(Boolean);
+  selMat[kind]=mats.map(m=>m.id);
+  const clips=selClip[kind].map(rel=>clipsCache.find(c=>c.rel===rel)).filter(Boolean);
+  selClip[kind]=clips.map(c=>c.rel);
+  const items=[].concat(mats.map(m=>({src:'mat',id:m.id,name:m.name})),
+                        clips.map(c=>({src:'clip',rel:c.rel,name:c.name})));
+  list.innerHTML='';
+  items.forEach((it,i)=>{
+    const li=document.createElement('li');
+    const nm=document.createElement('span'); nm.className='fname'; nm.textContent=it.name;
+    const acts=document.createElement('span'); acts.className='acts';
+    if(cfg.prefix){
+      const chip=document.createElement('button'); chip.className='chip'; chip.textContent=cfg.prefix+(i+1);
+      chip.title='插入引用 <'+cfg.prefix+' '+(i+1)+'>';
+      chip.onclick=()=>insertRef(cfg.prefix,i);
+      acts.appendChild(chip);
+    }
+    const rm=document.createElement('button'); rm.className='rm'; rm.textContent='移除';
+    rm.onclick=()=>{
+      if(it.src==='mat') selMat[kind]=selMat[kind].filter(x=>x!==it.id);
+      else selClip[kind]=selClip[kind].filter(x=>x!==it.rel);
+      renderSlot(kind);
+    };
+    acts.appendChild(rm);
+    li.appendChild(nm); li.appendChild(acts); list.appendChild(li);
+  });
+}
+function renderAllSlots(){ for(const k in selMat) renderSlot(k); }
+function matPreview(m,pid){
+  const u=matUrl(pid,m.file);
+  if(m.kind==='image') return '<img class="thumb" loading="lazy" src="'+u+'">';
+  if(m.kind==='video') return '<video class="thumb" muted playsinline preload="metadata" src="'+u+'"></video>';
+  return '<div class="thumbicon">'+MAT_KIND_CN[m.kind]+'</div>';
+}
+function renderMaterials(){
+  const box=$('matGrid'), pid=curProject; if(!box) return;
+  const sig=materials.map(m=>[m.id,m.name,m.kind,m.exists?1:0].join(',')).join('\n');
+  if(box._sig!==sig){
+    box._sig=sig; box.innerHTML='';
+    if(!materials.length) box.innerHTML='<div class="matempty">还没有素材，先在上方上传。</div>';
+    materials.forEach(m=>{
+      const d=document.createElement('div'); d.className='matcard';
+      d.innerHTML=matPreview(m,pid)+'<div class="mb"><div class="nm" title="'+esc(m.name)+'">'+esc(m.name)+'</div>'+
+        '<div class="mm">'+MAT_KIND_CN[m.kind]+' · '+fmtSize(m.size)+(m.exists?'':' · 文件缺失')+'</div></div>';
+      const ma=document.createElement('div'); ma.className='ma';
+      const rn=document.createElement('button'); rn.textContent='改名'; rn.onclick=()=>renameMaterial(m.id);
+      const rm=document.createElement('button'); rm.className='rm'; rm.textContent='删除'; rm.onclick=()=>deleteMaterial(m.id);
+      ma.appendChild(rn); ma.appendChild(rm); d.appendChild(ma);
+      box.appendChild(d);
     });
   }
-  input.onchange=()=>{
-    for(const f of Array.from(input.files)){
-      if(files.length>=max){ $('submitMsg').textContent=cn+' 最多 '+max+' 个'; break; }
-      const dup=files.some(x=>x.name===f.name&&x.size===f.size&&x.lastModified===f.lastModified);
-      if(!dup) files.push(f);
+  $('matSub').textContent=materials.length? (materials.length+' 个素材') : '';
+}
+async function refreshMaterials(){
+  if(!curProject) return;
+  const r=await api('/api/materials?project='+encodeURIComponent(curProject));
+  if(!r) return;
+  materials=r.materials||[];
+  renderMaterials(); renderAllSlots();
+}
+async function uploadMaterial(){
+  if(!curProject){ alert('请先进入一个项目'); return; }
+  const name=$('matName').value.trim();
+  const f=$('matFile').files[0];
+  if(!name){ $('matMsg').textContent='请填写素材名称'; return; }
+  if(!f){ $('matMsg').textContent='请选择要上传的文件'; return; }
+  const fd=new FormData();
+  fd.append('project',curProject); fd.append('name',name); fd.append('file',f);
+  $('matMsg').textContent='上传中…';
+  try{
+    const r=await fetch('/api/materials',{method:'POST',body:fd});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){ $('matMsg').textContent='上传失败：'+(j.error||r.status); return; }
+    materials=j.materials||materials;
+    $('matName').value=''; $('matFile').value='';
+    $('matMsg').textContent='已上传：'+((j.material&&j.material.name)||name);
+    renderMaterials(); renderAllSlots();
+  }catch(e){ $('matMsg').textContent='网络错误'; }
+}
+async function renameMaterial(mid){
+  const m=matById(mid); if(!m) return;
+  const name=await askInput('重命名素材',m.name,'保存','素材名称');
+  if(name==null) return;
+  const r=await fetch('/api/materials/'+encodeURIComponent(curProject)+'/'+encodeURIComponent(mid)+'/rename',
+    {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){ alert('改名失败：'+(j.error||j.msg||r.status)); return; }
+  materials=j.materials||materials; renderMaterials(); renderAllSlots();
+}
+async function deleteMaterial(mid){
+  const m=matById(mid); if(!m) return;
+  const ok=await askConfirm('删除素材「<b>'+esc(m.name)+'</b>」？正在使用它的排队/运行任务可能会失败。','删除素材','删除');
+  if(!ok) return;
+  const r=await fetch('/api/materials/'+encodeURIComponent(curProject)+'/'+encodeURIComponent(mid)+'/delete',
+    {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){ alert('删除失败：'+(j.error||j.msg||r.status)); return; }
+  materials=j.materials||materials; renderMaterials(); renderAllSlots();
+}
+async function openPick(kind, mode){
+  if(!curProject){ alert('请先进入一个项目'); return; }
+  pickMode=(mode==='clip')?'clip':'mat';
+  if(pickMode==='clip'){
+    await refreshOutputs();
+    if(!clipsCache.length){ alert('该项目还没有产物，先生成或用素材库素材。'); return; }
+    pickKind=kind; pickSingle=false;
+    pickSel=new Set(selClip[kind]);
+    $('pickTitle').textContent='选择产物 · '+SLOT_CN[kind].cn;
+    $('pickHint').textContent='可多选：点选多个产物作为参考视频';
+  }else{
+    const mk=SLOT_MEDIA[kind];
+    if(!materials.some(m=>m.kind===mk)){
+      alert('素材库中还没有'+MAT_KIND_CN[mk]+'素材，请先在「素材库」上传。'); return;
     }
-    input.value='';            // allow picking the same file again / keep appending
-    render();
-  };
-  const get=()=>files;
-  get.set=(arr)=>{ files=(arr||[]).slice(); render(); };
-  return get;
-}
-function bindOne(inputId, listId){
-  const input=$(inputId), list=$(listId); let file=null;
-  function render(){
-    list.innerHTML='';
-    if(!file) return;
-    const li=document.createElement('li');
-    const nm=document.createElement('span'); nm.className='fname'; nm.textContent=file.name;
-    const acts=document.createElement('span'); acts.className='acts';
-    const rm=document.createElement('button'); rm.className='rm'; rm.textContent='移除';
-    rm.onclick=()=>{file=null; input.value=''; render();};
-    acts.appendChild(rm); li.appendChild(nm); li.appendChild(acts); list.appendChild(li);
+    pickKind=kind; pickSingle=(kind==='first_frame'||kind==='last_frame');
+    pickSel=new Set(selMat[kind]);
+    $('pickTitle').textContent='选择素材 · '+SLOT_CN[kind].cn;
+    $('pickHint').textContent=pickSingle? '单选：点一张'+MAT_KIND_CN[mk]+'素材'
+                                       : '可多选：点选多个'+MAT_KIND_CN[mk]+'素材';
   }
-  input.onchange=()=>{ file=input.files[0]||null; input.value=''; render(); };
-  const get=()=>file;
-  get.set=(f)=>{ file=f||null; render(); };
-  return get;
+  renderPickGrid();
+  $('pickModal').classList.add('open');
 }
-const getImg = bindFiles('fImg','lImg',9,'图片','Picture');
-const getVid = bindFiles('fVid','lVid',3,'视频','Video');
-const getAud = bindFiles('fAud','lAud',3,'音频','Audio');
-const getFirst = bindOne('fFirst','lFirst');
-const getLast = bindOne('fLast','lLast');
+function togglePick(key){
+  if(pickSingle) pickSel=new Set(pickSel.has(key)?[]:[key]);
+  else if(pickSel.has(key)) pickSel.delete(key); else pickSel.add(key);
+  renderPickGrid();
+}
+function renderPickGrid(){
+  const pid=curProject, box=$('pickGrid'); box.innerHTML='';
+  if(pickMode==='clip'){
+    if(!clipsCache.length){ box.innerHTML='<div class="matempty">暂无可用产物</div>'; return; }
+    clipsCache.forEach(c=>{
+      const on=pickSel.has(c.rel);
+      const d=document.createElement('div'); d.className='matcard pick'+(on?' sel':'');
+      d.onclick=()=>togglePick(c.rel);
+      d.innerHTML='<div class="picktag">'+(on?'✓':'')+'</div>'+
+        '<video class="thumb" muted playsinline preload="metadata" src="/files/'+encodeURI(c.rel)+'"></video>'+
+        '<div class="mb"><div class="nm" title="'+esc(c.name)+'">'+esc(c.name)+'</div>'+
+        '<div class="mm">产物 · '+fmtSize(c.size)+' · '+c.ts+'</div></div>';
+      box.appendChild(d);
+    });
+    return;
+  }
+  const list=materials.filter(m=>m.kind===SLOT_MEDIA[pickKind] && m.exists);
+  if(!list.length){ box.innerHTML='<div class="matempty">暂无可用素材</div>'; return; }
+  list.forEach(m=>{
+    const d=document.createElement('div'); d.className='matcard pick'+(pickSel.has(m.id)?' sel':'');
+    d.onclick=()=>togglePick(m.id);
+    d.innerHTML='<div class="picktag">'+(pickSel.has(m.id)?'✓':'')+'</div>'+matPreview(m,pid)+
+      '<div class="mb"><div class="nm" title="'+esc(m.name)+'">'+esc(m.name)+'</div>'+
+      '<div class="mm">'+MAT_KIND_CN[m.kind]+' · '+fmtSize(m.size)+'</div></div>';
+    box.appendChild(d);
+  });
+}
+function pickOk(){
+  if(!pickKind) return;
+  if(pickMode==='clip') selClip[pickKind]=Array.from(pickSel);
+  else selMat[pickKind]=Array.from(pickSel);
+  renderSlot(pickKind);
+  closePick();
+}
+function closePick(){ $('pickModal').classList.remove('open'); pickKind=null; pickSel=new Set(); }
 
 function onModeChange(){
   const m=$('mode').value, ref=(m==='ref2v');
@@ -2235,8 +2614,8 @@ function onModeChange(){
   $('ref2vBox').style.display = ref? '':'none';
   $('refImageSizeRow').style.display = ref? '':'none';
   $('promptLabel').textContent = ref
-    ? '提示词（点下方素材后的「图片1 / 视频1 / 音频1」按钮即可插入 <Picture 1> 等引用）'
-    : '提示词（可选：上传首帧/尾帧；都不传即纯文生视频）';
+    ? '提示词（点素材后的「图片1 / 视频1 / 音频1」按钮即可插入 <Picture 1> 等引用）'
+    : '提示词（可选：从素材库选首帧/尾帧；都不选即纯文生视频）';
 }
 
 async function submit(){
@@ -2247,12 +2626,13 @@ async function submit(){
   const dur=$('dur').value, steps=$('steps').value;
   let media='';
   if(mode==='ref2v'){
-    const imgs=getImg(), vids=getVid(), auds=getAud();
-    if(!imgs.length && !vids.length && !auds.length){ alert('请至少上传一个参考素材'); return; }
-    media=[imgs.length?imgs.length+'图':null, vids.length?vids.length+'视频':null,
+    const imgs=selMat.ref_image, vids=selMat.ref_video.length+selClip.ref_video.length,
+          auds=selMat.ref_audio;
+    if(!imgs.length && !vids && !auds.length){ alert('请至少选择一个参考素材'); return; }
+    media=[imgs.length?imgs.length+'图':null, vids?vids+'视频':null,
            auds.length?auds.length+'音频':null].filter(Boolean).join(' / ');
   }else{
-    const ff=getFirst(), lf=getLast();
+    const ff=selMat.first_frame[0], lf=selMat.last_frame[0];
     media=[ff?'首帧':null, lf?'尾帧':null].filter(Boolean).join(' + ');
   }
   const ok=await askConfirm(
@@ -2270,14 +2650,13 @@ async function submit(){
   fd.append('ref_image_size', $('ref_image_size').value);
   if($('seed').value) fd.append('seed', $('seed').value);
   if(mode==='ref2v'){
-    const imgs=getImg(), vids=getVid(), auds=getAud();
-    imgs.forEach(f=>fd.append('ref_image', f));
-    vids.forEach(f=>fd.append('ref_video', f));
-    auds.forEach(f=>fd.append('ref_audio', f));
+    selMat.ref_image.forEach(id=>fd.append('ref_image', id));
+    selMat.ref_video.forEach(id=>fd.append('ref_video', id));
+    selClip.ref_video.forEach(rel=>fd.append('ref_video', 'clip:'+rel));
+    selMat.ref_audio.forEach(id=>fd.append('ref_audio', id));
   }else{
-    const ff=getFirst(), lf=getLast();
-    if(ff) fd.append('first_frame', ff);
-    if(lf) fd.append('last_frame', lf);
+    if(selMat.first_frame[0]) fd.append('first_frame', selMat.first_frame[0]);
+    if(selMat.last_frame[0]) fd.append('last_frame', selMat.last_frame[0]);
   }
   const xhr=new XMLHttpRequest(); xhr.open('POST','/api/run');
   $('prog').style.display='block'; $('prog').firstElementChild.style.width='0%';
@@ -2303,7 +2682,7 @@ async function resetForm(){
   $('prompt').value='';
   $('dur').value=5; $('steps').value=8; $('seed').value='';
   $('aspect').value=ASPECTS[0]; $('megapixels').value='0.4'; $('ref_image_size').value='match';
-  getImg.set([]); getVid.set([]); getAud.set([]); getFirst.set(null); getLast.set(null);
+  clearSelMat();
   $('prog').style.display='none'; $('submitMsg').textContent='';
 }
 
@@ -2704,7 +3083,9 @@ async function optimizePrompt(){
   const prompt=$('prompt').value.trim();
   if(!prompt){ $('submitMsg').textContent='请先填写提示词'; return; }
   const counts = $('mode').value==='ref2v'
-    ? {ref_image:getImg().length, ref_video:getVid().length, ref_audio:getAud().length}
+    ? {ref_image:selMat.ref_image.length,
+       ref_video:selMat.ref_video.length+selClip.ref_video.length,
+       ref_audio:selMat.ref_audio.length}
     : {};
   $('optText').value=''; $('optMsg').textContent='优化中…'; $('optBtn').disabled=true;
   $('optModal').classList.add('open');
