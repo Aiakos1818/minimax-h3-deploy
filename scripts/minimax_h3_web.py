@@ -2130,7 +2130,9 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
   .formgrid>.fcol:last-child{order:1}
   #taskCard>.formgrid>.fcol:first-child{order:1}
   #taskCard>.formgrid>.fcol:last-child{order:2;padding-top:43px}
-  #imgI2I>.formgrid>.fcol:first-child{padding-top:30px}
+  #imgI2I>.formgrid>.fcol:first-child{padding-top:36px}
+  #imgT2I>.formgrid>.fcol:last-child>.prompthead,#imgI2I>.formgrid>.fcol:last-child>.prompthead{margin-top:3px}
+  #imgT2I>.formgrid>.fcol:first-child>.grid2:first-child label{margin-bottom:10px}
   .formgrid textarea{min-height:214px}
   .params{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:4px}
   .params>.grid3,.params>.grid2{display:contents}
