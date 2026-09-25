@@ -1984,7 +1984,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
       <div class="cardhead"><h2>素材库</h2><span class="muted" id="matSub"></span></div>
       <div class="matup">
         <input id="matName" placeholder="素材名称（项目内唯一）" onkeydown="if(event.key==='Enter'){event.preventDefault();uploadMaterial()}">
-        <input id="matFile" type="file" accept="image/*,video/*,audio/*">
+        <input id="matFile" type="file" accept="image/*,video/*,audio/*" onchange="onMatFileChange()">
         <button type="button" class="ghost" onclick="uploadMaterial()">上传素材</button>
       </div>
       <div class="muted" id="matMsg" style="margin-top:6px"></div>
@@ -2582,6 +2582,11 @@ async function refreshMaterials(){
   if(!r) return;
   materials=r.materials||[];
   renderMaterials(); renderAllSlots();
+}
+function onMatFileChange(){
+  const f=$('matFile').files[0]; if(!f) return;
+  $('matName').value=f.name.replace(/\.[^.]+$/,'');
+  $('matMsg').textContent='';
 }
 async function uploadMaterial(){
   if(!curProject){ notice('请先进入一个项目'); return; }
