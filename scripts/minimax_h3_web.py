@@ -35,6 +35,7 @@ MATERIAL_EXTS = {".png": "image", ".jpg": "image", ".jpeg": "image", ".webp": "i
                  ".mp3": "audio", ".wav": "audio", ".m4a": "audio", ".aac": "audio",
                  ".flac": "audio", ".ogg": "audio"}
 MATERIAL_KIND_CN = {"image": "图片", "video": "视频", "audio": "音频"}
+MATERIAL_MB = {"image": MAX_IMAGE_MB, "video": MAX_VIDEO_MB, "audio": MAX_AUDIO_MB}
 MATERIAL_NAME_MAX = 60
 THUMB_MAX = 480
 PREVIEW_MAX = 1600
@@ -658,6 +659,10 @@ class Manager:
             return None, "不支持的文件类型：%s" % (ext or "未知")
         if not content:
             return None, "文件内容为空"
+        lim = MATERIAL_MB.get(kind)
+        if lim and len(content) > lim * 1048576:
+            return None, "%s「%s」%.1fMB，超过 %dMB 上限" % (
+                MATERIAL_KIND_CN[kind], name, len(content) / 1048576, lim)
         mid = self.new_id()
         stored = mid + ext
         with self.lock:
@@ -1964,7 +1969,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .opttext{width:100%;min-height:220px;max-height:56vh;background:#0b0e13;color:var(--fg);
        border:1px solid var(--line);border-radius:8px;padding:10px;font-size:13px;line-height:1.5;resize:vertical}
 .optrow{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}
-.optrow b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.optrow b{min-width:0;overflow-wrap:anywhere}
 .optrow button{flex:0 0 auto;white-space:nowrap}
 .optacts{display:flex;gap:8px;margin-top:10px}
 .optacts button.primary,.optacts button.ghost{flex:1 1 0;width:auto;height:38px;margin:0;padding:0 10px;
@@ -1982,9 +1987,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .bcbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .projsub{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .matcardhead{font-size:14px;color:var(--mut);font-weight:600;margin-bottom:10px}
-.matup{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.matup #matName{flex:1 1 240px;min-width:0}
-.matup #matFile{flex:1 1 260px;min-width:0;padding:7px 10px;font-size:13px}
+.matgrouphead .ghostbtns{display:inline-flex;gap:6px;flex:0 0 auto}
 .matgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-top:12px;align-items:start}
 .matgroups{display:flex;flex-direction:column;gap:16px;margin-top:12px}
 .matgrouphead{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;color:var(--mut);font-weight:600;margin-bottom:8px}
@@ -2235,11 +2238,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     <div class="statgrid">
       <div class="card" id="matCard">
         <div class="matcardhead">素材库 <span class="muted" id="matSub"></span></div>
-        <div class="matup">
-          <input id="matName" placeholder="素材名称（项目内唯一）" onkeydown="if(event.key==='Enter'){event.preventDefault();uploadMaterial()}">
-          <input id="matFile" type="file" accept="image/*,video/*,audio/*" onchange="onMatFileChange()">
-          <button type="button" class="ghost" onclick="uploadMaterial()">上传素材</button>
-        </div>
+        <input id="matAddFile" type="file" style="display:none" onchange="onMatAddPick()">
         <div class="muted" id="matMsg" style="margin-top:6px"></div>
         <div id="matGrid" class="matgroups"></div>
       </div>
@@ -2376,6 +2375,17 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     </div>
   </div>
 </div>
+<div class="modal" id="upModal">
+  <div class="box" style="width:min(420px,96vw)">
+    <div class="optrow"><b>上传素材</b></div>
+    <div class="muted" id="upName" style="margin-bottom:8px;word-break:break-all"></div>
+    <div class="bar"><i id="upFill"></i></div>
+    <div class="muted" id="upPct">0%</div>
+    <div class="optacts">
+      <button class="ghost" id="upCancelBtn" onclick="cancelUpload()">取消</button>
+    </div>
+  </div>
+</div>
 <div class="modal" id="shotModal" onclick="if(event.target===this)closeShotModal()">
   <div class="box" style="width:min(420px,96vw)">
     <div class="optrow"><b id="shotTitle">添加分镜</b><button class="ghost" onclick="closeShotModal()">关闭</button></div>
@@ -2419,6 +2429,10 @@ const SLOT_CN={ref_image:{cn:'图片',prefix:'Picture',list:'lImg'},
 const SLOT_MEDIA={ref_image:'image',ref_video:'video',ref_audio:'audio',
                   first_frame:'image',last_frame:'image'};
 const MAT_KIND_CN={image:'图片',video:'视频',audio:'音频'};
+const MAT_MAX_MB={image:30,video:50,audio:15};
+const MAT_EXT_KIND={png:'image',jpg:'image',jpeg:'image',webp:'image',bmp:'image',gif:'image',
+  mp4:'video',mov:'video',webm:'video',mkv:'video',avi:'video',
+  mp3:'audio',wav:'audio',m4a:'audio',aac:'audio',flac:'audio',ogg:'audio'};
 const STATUS_CN = {queued:'排队中', running:'进行中', done:'已完成', failed:'失败', cancelled:'已取消', interrupted:'已中断'};
 const MEDIA_CN = {ref_image:'图', ref_video:'视频', ref_audio:'音频'};
 const MODE_CN = {t2v:'文生视频', ref2v:'参考生视频', edit:'剪辑成片', t2i:'文生图'};
@@ -2905,18 +2919,21 @@ function renderMaterials(){
   const box=$('matGrid'), pid=curProject; if(!box) return;
   const sig=materials.map(m=>[m.id,m.name,m.kind,m.exists?1:0].join(',')).join('\n');
   if(box._sig!==sig){
+    const wasOpen={};
+    box.querySelectorAll('details.matgroup').forEach(d=>{ if(d.dataset.kind) wasOpen[d.dataset.kind]=d.open; });
     box._sig=sig; box.innerHTML='';
     [['image','图片'],['video','视频'],['audio','音频']].forEach(([kind,label])=>{
       const list=materials.filter(m=>m.kind===kind);
-      const sec=document.createElement('details'); sec.className='matgroup';
+      const sec=document.createElement('details'); sec.className='matgroup'; sec.dataset.kind=kind;
+      if(wasOpen[kind]) sec.open=true;
       const hd=document.createElement('summary'); hd.className='matgrouphead';
       hd.setAttribute('onclick','toggleSec(event)');
+      let btns='<button class="ghost" onclick="event.preventDefault();event.stopPropagation();matAddOpen(\''+kind+'\')">添加</button>';
       if(kind==='image'){
-        hd.innerHTML='<span class="setoggle">'+label+' ('+list.length+')</span>'+
-          '<button class="ghost" onclick="event.preventDefault();event.stopPropagation();openImageCreator()">创作图片素材</button>';
-      }else{
-        hd.innerHTML='<span class="setoggle">'+label+' ('+list.length+')</span>';
+        btns='<button class="ghost" onclick="event.preventDefault();event.stopPropagation();openImageCreator()">创作图片素材</button>'+btns;
       }
+      hd.innerHTML='<span class="setoggle">'+label+' ('+list.length+')</span>'+
+        '<span class="ghostbtns">'+btns+'</span>';
       sec.appendChild(hd);
       if(!list.length){ box.appendChild(sec); return; }
       const g=document.createElement('div'); g.className='matgrid';
@@ -3115,29 +3132,71 @@ async function imgTick(){
   else if(j.status==='failed'){ $('imgStatus').textContent='生成失败：'+friendlyErr(j.err); imgJobId=null; }
   else if(j.status==='cancelled'||j.status==='interrupted'){ $('imgStatus').textContent='已取消/中断'; imgJobId=null; }
 }
-function onMatFileChange(){
-  const f=$('matFile').files[0]; if(!f) return;
-  $('matName').value=f.name.replace(/\.[^.]+$/,'');
-  $('matMsg').textContent='';
+let matAddKind='';
+const MAT_ACCEPT={image:'image/*',video:'video/*',audio:'audio/*'};
+function matNameFromFile(fn){
+  let n=String(fn||'').replace(/\.[^.]*$/,'').replace(/\s+/g,' ').trim();
+  n=n.replace(/[/\\]/g,'／');
+  if(n.length>60) n=n.slice(0,60);
+  return n;
 }
-async function uploadMaterial(){
+function matAddOpen(kind){
   if(!curProject){ notice('请先进入一个项目'); return; }
-  const name=$('matName').value.trim();
-  const f=$('matFile').files[0];
-  if(!name){ $('matMsg').textContent='请填写素材名称'; return; }
-  if(!f){ $('matMsg').textContent='请选择要上传的文件'; return; }
-  const fd=new FormData();
-  fd.append('project',curProject); fd.append('name',name); fd.append('file',f);
-  $('matMsg').textContent='上传中…';
-  try{
-    const r=await fetch('/api/materials',{method:'POST',body:fd});
-    const j=await r.json().catch(()=>({}));
-    if(!r.ok){ $('matMsg').textContent='上传失败：'+(j.error||r.status); return; }
-    materials=j.materials||materials;
-    $('matName').value=''; $('matFile').value='';
-    $('matMsg').textContent='已上传：'+((j.material&&j.material.name)||name);
-    renderMaterials(); renderAllSlots();
-  }catch(e){ $('matMsg').textContent='网络错误'; }
+  matAddKind=kind;
+  const inp=$('matAddFile');
+  inp.accept=MAT_ACCEPT[kind]||'';
+  inp.value='';
+  inp.click();
+}
+async function onMatAddPick(){
+  const inp=$('matAddFile');
+  const f=inp.files && inp.files[0]; if(!f) return;
+  inp.value='';
+  const fk=MAT_EXT_KIND[(String(f.name).split('.').pop()||'').toLowerCase()];
+  if(!fk){ notice('不支持的文件类型：'+fileExt(f.name)); return; }
+  if(f.size > MAT_MAX_MB[fk]*1048576){
+    notice(MAT_KIND_CN[fk]+'文件 '+fmtSize(f.size)+'，超过 '+MAT_MAX_MB[fk]+'MB 上限'); return; }
+  let name=matNameFromFile(f.name);
+  await refreshMaterials();
+  while(materials.some(m=>(m.name||'')===name)){
+    name=await askInput('已存在同名素材「'+name+'」，请修改后上传',name,'上传','新的素材名称');
+    if(name==null) return;
+    name=(name||'').trim().replace(/[/\\]/g,'／');
+    if(!name){ notice('请填写素材名称'); return; }
+    if(name.length>60) name=name.slice(0,60);
+  }
+  if(!name){ notice('请填写素材名称'); return; }
+  await uploadMaterial(name,f);
+}
+let upXhr=null;
+function cancelUpload(){ if(upXhr){ try{ upXhr.abort(); }catch(e){} } else { $('upModal').classList.remove('open'); } }
+function uploadMaterial(name,f){
+  return new Promise((resolve)=>{
+    if(!curProject){ notice('请先进入一个项目'); resolve(); return; }
+    const fd=new FormData();
+    fd.append('project',curProject); fd.append('name',name); fd.append('file',f);
+    $('upName').textContent=name;
+    $('upFill').style.width='0%'; $('upPct').textContent='0%';
+    $('upModal').classList.add('open');
+    $('matMsg').textContent='上传中…';
+    const xhr=new XMLHttpRequest(); upXhr=xhr;
+    xhr.open('POST','/api/materials');
+    xhr.upload.onprogress=(e)=>{ if(e.lengthComputable){ const p=Math.round(e.loaded/e.total*100);
+      $('upFill').style.width=p+'%'; $('upPct').textContent=p+'%'; } };
+    xhr.onload=()=>{ upXhr=null; $('upModal').classList.remove('open');
+      let j={}; try{ j=JSON.parse(xhr.responseText); }catch(e){}
+      if(xhr.status<200||xhr.status>=300){ const msg=j.error||('HTTP '+xhr.status);
+        $('matMsg').textContent='上传失败：'+msg; notice('上传失败：'+msg); resolve(); return; }
+      materials=j.materials||materials;
+      $('matMsg').textContent='已上传：'+((j.material&&j.material.name)||name);
+      renderMaterials(); renderAllSlots(); resolve();
+    };
+    xhr.onerror=()=>{ upXhr=null; $('upModal').classList.remove('open');
+      $('matMsg').textContent='网络错误'; resolve(); };
+    xhr.onabort=()=>{ upXhr=null; $('upModal').classList.remove('open');
+      $('matMsg').textContent='已取消上传'; resolve(); };
+    xhr.send(fd);
+  });
 }
 async function deleteMaterial(mid){
   const m=matById(mid); if(!m) return;
