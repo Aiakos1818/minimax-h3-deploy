@@ -64,13 +64,41 @@ NOW = lambda: time.strftime("%Y-%m-%d %H:%M:%S")
 
 # ---------------------------------------------------- prompt optimizer (cloud)
 LLM_CONF_PATH = os.path.expanduser("~/.config/h3ref2v/llm.conf")
-LLM_SYSTEM_PROMPT = (
-    "你是 MiniMax H3 参考生视频（reference-to-video）模型的提示词工程师。"
-    "请在保持原意、不改语言（中文输入→中文输出）的前提下，把用户提示词改写得更具体、更适合视频生成："
-    "补充主体与动作、镜头运动、景别、光线、氛围、风格和画质描述，写成一段连贯自然的话，不要分点、不要解释。"
-    "必须严格保持 <Picture N> / <Video N> / <Audio N> 引用标签原样不变（含编号），"
-    "不要新增不存在的引用，不要改动标签内容。只输出优化后的提示词本身。"
-)
+LLM_SYSTEM_PROMPTS = {
+    "ref2v": (
+        "你是 MiniMax H3 参考生视频（reference-to-video）模型的提示词工程师。"
+        "请在保持原意、不改语言（中文输入→中文输出）的前提下，把用户提示词改写得更具体、更适合视频生成："
+        "补充主体与动作、镜头运动、景别、光线、氛围、风格和画质描述，写成一段连贯自然的话，不要分点、不要解释。"
+        "必须严格保持 <Picture N> / <Video N> / <Audio N> 引用标签原样不变（含编号），"
+        "不要新增不存在的引用，不要改动标签内容。只输出优化后的提示词本身。"
+    ),
+    "fl2v": (
+        "你是 MiniMax H3 首尾帧生视频（first-last-frame-to-video）模型的提示词工程师。"
+        "用户会给出首帧和/或尾帧图片，请在保持原意、不改语言（中文输入→中文输出）的前提下，"
+        "把用户提示词改写得更具体、更适合首帧到尾帧之间的视频生成：描述主体动作与形态变化、"
+        "镜头运动、节奏、光线与色调变化、氛围、风格和画质，写成一段连贯自然的话，不要分点、不要解释。"
+        "不要添加 <Picture N> / <Video N> / <Audio N> 引用标签，也不要写「首帧」「尾帧」这类技术词。"
+        "只输出优化后的提示词本身。"
+    ),
+    "t2i": (
+        "你是文生图（text-to-image）模型的提示词工程师。"
+        "请在保持原意、不改语言（中文输入→中文输出）的前提下，把用户提示词改写得更具体、更适合生成单张静态图片："
+        "补充主体外观与细节、构图与视角、光线与色调、材质质感、氛围、艺术风格和画质"
+        "（如电影感、超高清、浅景深），写成一段连贯自然的话，不要分点、不要解释。"
+        "不要加入镜头运动、时长、分镜等视频术语，也不要添加 <Picture N> / <Video N> / <Audio N> 引用标签；"
+        "用户明确要求透明背景、白底、指定画幅等时，必须原样保留。只输出优化后的提示词本身。"
+    ),
+    "i2i": (
+        "你是图生图（image-to-image）模型的提示词工程师。"
+        "用户会提供一张底图，请在保持原意、不改语言（中文输入→中文输出）的前提下，"
+        "把用户的修改要求改写得更适合在保留底图主体与构图的基础上做修改：写清要保留的元素、"
+        "要改变的元素（外观、材质、颜色、光线、背景、风格等）以及期望的整体观感与画质，"
+        "写成一段连贯自然的话，不要分点、不要解释。"
+        "不要加入镜头运动、时长、分镜等视频术语，也不要添加 <Picture N> / <Video N> / <Audio N> 引用标签。"
+        "只输出优化后的提示词本身。"
+    ),
+}
+LLM_SYSTEM_PROMPT_DEFAULT = "ref2v"
 
 
 def load_llm_conf():
@@ -98,17 +126,22 @@ def load_llm_conf():
     return conf
 
 
-def llm_optimize(prompt, counts):
+def llm_optimize(prompt, counts, kind=LLM_SYSTEM_PROMPT_DEFAULT):
     conf = load_llm_conf()
     if not conf["key"]:
         return False, ("未配置云端 API key：请在 %s 写 key=...，或设置环境变量 REF2V_LLM_KEY"
                        % LLM_CONF_PATH)
-    have = "、".join("%s %d" % (cn, counts.get(k, 0)) for k, cn in
-                     (("ref_image", "参考图"), ("ref_video", "参考视频"), ("ref_audio", "参考音频"))
-                     if counts.get(k))
-    user = "可用参考素材：%s。\n\n原始提示词：\n%s" % (have or "无", prompt)
+    system = LLM_SYSTEM_PROMPTS.get(kind) or LLM_SYSTEM_PROMPTS[LLM_SYSTEM_PROMPT_DEFAULT]
+    if kind in ("ref2v", "fl2v"):
+        have = "、".join("%s %d" % (cn, counts.get(k, 0)) for k, cn in
+                         (("ref_image", "参考图"), ("ref_video", "参考视频"), ("ref_audio", "参考音频"),
+                          ("first_frame", "首帧"), ("last_frame", "尾帧"))
+                         if counts.get(k))
+        user = "可用参考素材：%s。\n\n原始提示词：\n%s" % (have or "无", prompt)
+    else:
+        user = "原始提示词：\n%s" % prompt
     payload = {"model": conf["model"], "temperature": 0.7, "stream": False,
-               "messages": [{"role": "system", "content": LLM_SYSTEM_PROMPT},
+               "messages": [{"role": "system", "content": system},
                             {"role": "user", "content": user}]}
     req = urllib.request.Request(
         conf["base"].rstrip("/") + "/chat/completions",
@@ -1897,7 +1930,7 @@ def make_handler(mgr):
                     self._err(400, "请先填写提示词"); return
                 if len(prompt) > 4000:
                     self._err(400, "提示词过长（>4000 字符）"); return
-                ok, text = llm_optimize(prompt, js.get("counts") or {})
+                ok, text = llm_optimize(prompt, js.get("counts") or {}, js.get("kind") or LLM_SYSTEM_PROMPT_DEFAULT)
                 self._json(200, {"ok": True, "text": text}) if ok else self._err(502, text)
                 return
             if u.path == "/api/images":
@@ -4228,17 +4261,25 @@ async function optimizePrompt(target,btn){
   const prompt=(ta.value||'').trim();
   if(!prompt){ notice('请先填写提示词'); return; }
   optTarget=ta.id;
-  const counts = (ta.id==='prompt' && $('mode').value==='ref2v')
-    ? {ref_image:selMat.ref_image.length,
-       ref_video:selMat.ref_video.length+selClip.ref_video.length,
-       ref_audio:selMat.ref_audio.length}
-    : {};
+  let kind='ref2v', counts={};
+  if(ta.id==='imgPrompt') kind='t2i';
+  else if(ta.id==='imgI2IPrompt') kind='i2i';
+  else if($('mode').value==='ref2v'){
+    kind='ref2v';
+    counts={ref_image:selMat.ref_image.length,
+            ref_video:selMat.ref_video.length+selClip.ref_video.length,
+            ref_audio:selMat.ref_audio.length};
+  }else{
+    kind='fl2v';
+    counts={first_frame:selMat.first_frame.length,
+            last_frame:selMat.last_frame.length};
+  }
   $('optText').value=''; $('optMsg').textContent='优化中…';
   if(btn) btn.disabled=true;
   $('optModal').classList.add('open');
   try{
     const r=await fetch('/api/optimize',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({prompt,counts})});
+      body:JSON.stringify({prompt,counts,kind})});
     const j=await r.json().catch(()=>({}));
     if(r.ok && j.ok){ $('optText').value=j.text; $('optMsg').textContent='优化完成'; }
     else $('optMsg').textContent='优化失败: '+(j.error||r.status);
