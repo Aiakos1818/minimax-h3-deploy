@@ -287,10 +287,22 @@ _STAGE_LINE_RE = re.compile(r"^\[stage\]\s*(\S+)")
 _PROG_RE = re.compile(r"\[progress\]\s+(\d+)/(\d+)")
 
 
+def _stage_lines(text):
+    return [l for l in text.splitlines()
+            if l.strip() and "[progress]" not in l
+            and not l.startswith(("cmd:", "=== job", "[web]", "[comfy]"))]
+
+
+def stage_key_from_log(text):
+    for l in reversed(_stage_lines(text)):
+        m = _STAGE_LINE_RE.match(l)
+        if m:
+            return m.group(1)
+    return None
+
+
 def stage_from_log(text):
-    lines = [l for l in text.splitlines()
-             if l.strip() and "[progress]" not in l
-             and not l.startswith(("cmd:", "=== job", "[web]", "[comfy]"))]
+    lines = _stage_lines(text)
     for l in reversed(lines):
         m = _STAGE_LINE_RE.match(l)
         if m:
@@ -571,20 +583,25 @@ class Manager:
                 text = f.read().decode("utf-8", "replace")
         except Exception:
             text = ""
-        job["st"]["stage"] = {"label": stage_from_log(text), "ts": NOW()}
+        key = stage_key_from_log(text)
+        job["st"]["stage"] = {"label": _STAGE_LABELS.get(key) or stage_from_log(text), "key": key,
+                              "ts": NOW()}
         detail = None
         for l in text.splitlines():
             if l.startswith("[comfy] "):
                 detail = l[len("[comfy] "):].strip()
         if detail:
             job["st"]["detail"] = detail[:160]
-        m = None
-        for m in _PROG_RE.finditer(text):
-            pass
-        if m:
-            cur, total = int(m.group(1)), int(m.group(2))
-            if total > 0 and cur <= total:
-                job["st"]["progress"] = {"cur": cur, "total": total}
+        if key != "sampling":
+            job["st"].pop("progress", None)
+        else:
+            m = None
+            for m in _PROG_RE.finditer(text):
+                pass
+            if m:
+                cur, total = int(m.group(1)), int(m.group(2))
+                if total > 0 and cur <= total:
+                    job["st"]["progress"] = {"cur": cur, "total": total}
 
     def blocking_busy(self):
         qr = self.comfy.running_prompts()
@@ -1441,9 +1458,14 @@ function friendlyStatus(j){
     const p = j.progress;
     return p? (lab+' '+p.cur+'/'+p.total) : lab;
   }
-  if(j.status==='done') return '已完成'+(j.clip_seconds? ' · '+j.clip_seconds+'s':'');
-  if(j.status==='failed') return '失败：'+friendlyErr(j.err);
-  if(j.status==='cancelled') return '已取消';
+  if(j.status==='done'){
+    const parts=['已完成'];
+    if(j.clip_seconds) parts.push('视频 '+j.clip_seconds+'s');
+    if(j.duration!=null) parts.push('用时 '+fmtDur(j.duration));
+    return parts.join(' · ');
+  }
+  if(j.status==='failed') return '失败：'+friendlyErr(j.err)+(j.duration!=null?' · 用时 '+fmtDur(j.duration):'');
+  if(j.status==='cancelled') return '已取消'+(j.duration!=null?' · 用时 '+fmtDur(j.duration):'');
   if(j.status==='interrupted') return '已中断(web 重启)，请重新提交';
   return STATUS_CN[j.status]||j.status;
 }
