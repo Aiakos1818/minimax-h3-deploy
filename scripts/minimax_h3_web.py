@@ -34,6 +34,8 @@ MATERIAL_EXTS = {".png": "image", ".jpg": "image", ".jpeg": "image", ".webp": "i
                  ".flac": "audio", ".ogg": "audio"}
 MATERIAL_KIND_CN = {"image": "图片", "video": "视频", "audio": "音频"}
 MATERIAL_NAME_MAX = 60
+THUMB_MAX = 480
+THUMB_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_thumb.py")
 MODES = ("t2v", "ref2v")
 OUT_SUBDIRS = {"t2v": "t2v", "ref2v": "ref2v", "edit": "edit"}
 TRANSITIONS = ("cut", "fade", "dissolve", "push")
@@ -501,14 +503,28 @@ class Manager:
         if not p:
             return []
         d = self._materials_dir(pid)
+        try:
+            helper_mt = int(os.path.getmtime(THUMB_HELPER))
+        except OSError:
+            helper_mt = 0
         out = []
         for m in p.get("materials") or []:
             if not isinstance(m, dict) or not m.get("file"):
                 continue
+            fp = os.path.join(d, m["file"])
+            exists = os.path.isfile(fp)
+            kind = m.get("kind") or "image"
+            v = 0
+            if kind == "image" and exists:
+                try:
+                    v = max(int(os.path.getmtime(fp)), helper_mt)
+                except OSError:
+                    v = helper_mt
             out.append({"id": m.get("id"), "name": m.get("name") or "",
-                        "kind": m.get("kind") or "image", "file": m.get("file"),
+                        "kind": kind, "file": m.get("file"),
                         "size": m.get("size") or 0, "ts": m.get("ts"),
-                        "exists": os.path.isfile(os.path.join(d, m["file"]))})
+                        "thumb_v": v,
+                        "exists": exists})
         return out
 
     def material_path(self, pid, mid):
@@ -531,6 +547,39 @@ class Manager:
         if cand.startswith(base + os.sep) and os.path.isfile(cand):
             return cand
         return None
+
+    def _thumbs_dir(self, pid):
+        return os.path.join(self._proj_dir(pid), "thumbs")
+
+    def material_thumb(self, pid, fn):
+        """Resolve a material image to a cached small thumbnail (else the original)."""
+        src = self.material_file(pid, fn)
+        if not src:
+            return None
+        p = self.projects.get(pid)
+        kind = None
+        for m in (p.get("materials") or []) if p else []:
+            if isinstance(m, dict) and m.get("file") == fn:
+                kind = m.get("kind"); break
+        if kind != "image":
+            return src
+        dst = os.path.join(self._thumbs_dir(pid), fn + ".jpg")
+        try:
+            helper_mt = os.path.getmtime(THUMB_HELPER) if os.path.isfile(THUMB_HELPER) else 0
+            fresh = (os.path.isfile(dst)
+                     and os.path.getmtime(dst) >= max(os.path.getmtime(src), helper_mt))
+        except OSError:
+            fresh = False
+        if fresh:
+            return dst
+        try:
+            os.makedirs(self._thumbs_dir(pid), exist_ok=True)
+            subprocess.run([sys.executable, THUMB_HELPER, src, dst, str(THUMB_MAX)],
+                           check=True, timeout=30,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            return src
+        return dst if os.path.isfile(dst) else src
 
     def _mat_name_ok(self, name):
         name = (name or "").strip()
@@ -569,24 +618,6 @@ class Manager:
             p.setdefault("materials", []).append(mat)
             self._write_project(p)
         return mat, None
-
-    def rename_material(self, pid, mid, name):
-        name, err = self._mat_name_ok(name)
-        if err:
-            return False, err
-        with self.lock:
-            p = self.projects.get(pid)
-            if not p:
-                return False, "项目不存在"
-            for m in p.get("materials") or []:
-                if isinstance(m, dict) and m.get("id") == mid:
-                    if any(o is not m and (o.get("name") or "") == name
-                           for o in p.get("materials") or []):
-                        return False, "素材名称「%s」已存在" % name
-                    m["name"] = name
-                    self._write_project(p)
-                    return True, "已重命名"
-        return False, "素材不存在"
 
     def delete_material(self, pid, mid):
         with self.lock:
@@ -873,9 +904,12 @@ class Manager:
             if st == "queued":
                 self.queue = [x for x in self.queue if x != jid]
                 job["st"].update(status="cancelled", ended=NOW())
+            rel = job["st"].get("clip_rel")
             shutil.rmtree(self._job_dir(jid), ignore_errors=True)
             del self.jobs[jid]
-            return True, "已删除记录(产物保留)"
+        if rel:
+            self.delete_outputs([rel])
+        return True, "已删除分镜及其产物"
 
     # ---- snapshots ----
     def info(self, job):
@@ -1248,7 +1282,7 @@ def make_handler(mgr):
         def _err(self, code, msg):
             self._json(code, {"error": msg})
 
-        def _send_file_range(self, path, force_dl=False):
+        def _send_file_range(self, path, force_dl=False, cache=False):
             try:
                 size = os.path.getsize(path)
             except OSError:
@@ -1288,7 +1322,8 @@ def make_handler(mgr):
                                  % (ascii_name, quote(name, safe="")))
             self.send_header("Content-Length", str(length))
             self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control",
+                             "public, max-age=86400" if cache else "no-store")
             self.end_headers()
             if self.command == "HEAD":
                 return
@@ -1410,6 +1445,13 @@ def make_handler(mgr):
                 if not os.path.isfile(cand):
                     self._err(404, "file not found"); return
                 self._send_file_range(cand)
+            elif u.path.startswith("/thumb/"):
+                rest = u.path[len("/thumb/"):]
+                pid, _, fn = rest.partition("/")
+                cand = mgr.material_thumb(pid, unquote(fn)) if fn else None
+                if not cand:
+                    self._err(404, "not found"); return
+                self._send_file_range(cand, cache=True)
             elif u.path.startswith("/material/"):
                 rest = u.path[len("/material/"):]
                 pid, _, fn = rest.partition("/")
@@ -1456,18 +1498,16 @@ def make_handler(mgr):
                     self._json(200 if ok else 400, {"ok": ok, "msg": msg}); return
                 ok, msg = mgr.delete_project(pid, js.get("mode") or "detach")
                 self._json(200 if ok else 409, {"ok": ok, "msg": msg}); return
-            matm = re.match(r"^/api/materials/([^/]+)/([^/]+)/(rename|delete)$", u.path)
+            matm = re.match(r"^/api/materials/([^/]+)/([^/]+)/delete$", u.path)
             if matm:
-                pid, mid, action = matm.group(1), matm.group(2), matm.group(3)
+                pid, mid = matm.group(1), matm.group(2)
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
-                    js = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                    if length:
+                        self.rfile.read(length)
                 except Exception:
-                    self._err(400, "bad json"); return
-                if action == "rename":
-                    ok, msg = mgr.rename_material(pid, mid, js.get("name"))
-                else:
-                    ok, msg = mgr.delete_material(pid, mid)
+                    pass
+                ok, msg = mgr.delete_material(pid, mid)
                 self._json(200 if ok else 409, {"ok": ok, "msg": msg,
                                                 "materials": mgr.materials_list(pid)})
                 return
@@ -1742,11 +1782,11 @@ details.sec:not([open])>summary::before{transform:rotate(-90deg)}
 details.sec[open]>summary{margin-bottom:10px}
 pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(--line);border-radius:8px;
         padding:8px;font-size:12px;color:#c7cede;white-space:pre-wrap;word-break:break-all}
-.job{display:flex;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
-.job .st{font-size:12px;padding:2px 8px;border-radius:999px;background:#20242d}
-.st.done{background:var(--ok);color:#0b0d11}.st.running{background:var(--acc);color:#fff}
-.st.failed,.st.cancelled,.st.interrupted{background:var(--err);color:#fff}.st.queued{background:var(--warn);color:#0b0d11}
-.job .meta{font-size:12px;color:var(--mut);flex:1;min-width:160px}
+.job{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.job .st{display:block;font-size:14px;font-weight:700;background:none;padding:0;border-radius:0}
+.st.done{color:var(--ok)}.st.running{color:var(--acc)}
+.st.failed,.st.cancelled,.st.interrupted{color:var(--err)}.st.queued{color:var(--warn)}
+.job .meta{font-size:14px;line-height:normal;color:var(--mut);flex:1;min-width:160px;margin-top:-.1em}
 .jobsacts{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .clips{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
 .clip{position:relative;background:#0e1116;border:1px solid var(--line);border-radius:10px;overflow:hidden;cursor:pointer}
@@ -1757,15 +1797,11 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
        font-size:14px;color:#fff}
 .clip.sel{outline:3px solid var(--acc);outline-offset:-3px}
 .clip.sel .pick{background:var(--acc);border-color:var(--acc)}
-.sumacts{display:flex;gap:8px}
-.sumacts .editonly{display:none}
-.sumacts.editing .editonly{display:block}
-.sumacts.editing #clipGoBtn{display:none}
-#stClips>.sumacts button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
-#stClips{position:relative}
-#stClips>details>summary{width:fit-content;margin-right:auto}
-#stClips>.sumacts{position:absolute;top:14px;right:14px}
-#stClips>details[open]>summary{margin-bottom:22px}
+.cardacts{position:absolute;top:14px;right:14px;display:flex;gap:8px;z-index:1}
+#stJobs{position:relative}
+#stJobs>details>summary{width:fit-content;margin-right:auto}
+#stJobs>details[open]>summary{margin-bottom:22px}
+.jthumb{width:120px;aspect-ratio:16/9;background:#000;border-radius:8px;object-fit:cover;flex:0 0 auto;cursor:pointer}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;align-items:center;justify-content:center;z-index:20;padding:12px}
 .modal.open{display:flex}
 .modal .box{width:min(960px,98vw);background:#0e1116;border:1px solid var(--line);border-radius:12px;padding:10px}
@@ -1796,22 +1832,22 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .matup{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .matup #matName{flex:1 1 240px;min-width:0}
 .matup #matFile{flex:1 1 260px;min-width:0;padding:7px 10px;font-size:13px}
-.matgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:12px}
+.matgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-top:12px;align-items:start}
 .matcard{background:#0e1116;border:1px solid var(--line);border-radius:10px;overflow:hidden;
-         display:flex;flex-direction:column;position:relative}
+         display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"thumb thumb" "mb ma";position:relative}
 .matcard.pick{cursor:pointer}
 .matcard.pick:hover{border-color:var(--acc)}
 .matcard.sel{outline:3px solid var(--acc);outline-offset:-3px}
-.matcard .thumb{width:100%;aspect-ratio:16/9;background:#000;object-fit:cover;display:block}
-.matcard .thumbicon{width:100%;aspect-ratio:16/9;background:#0a0c11;display:flex;align-items:center;
+.matcard .thumb{grid-area:thumb;width:100%;aspect-ratio:16/9;background:#000;object-fit:cover;display:block}
+.matcard img.thumb{object-fit:contain;background:#0a0c11}
+.matcard .thumbicon{grid-area:thumb;width:100%;aspect-ratio:16/9;background:#0a0c11;display:flex;align-items:center;
         justify-content:center;color:var(--mut);font-size:12px;letter-spacing:.05em}
-.matcard .mb{padding:7px 9px 4px;flex:1;min-width:0}
+.matcard .mb{grid-area:mb;padding:6px 9px 8px;min-width:0}
 .matcard .nm{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.matcard .mm{font-size:11px;color:var(--mut);margin-top:2px}
-.matcard .ma{display:flex;gap:6px;padding:0 9px 9px}
-.matcard .ma button{flex:1 1 0;background:#20242d;border:1px solid var(--line);color:var(--fg);
-        border-radius:6px;padding:4px 0;font-size:12px;cursor:pointer}
-.matcard .ma button.rm{color:var(--err)}
+.matcard .mm{font-size:11px;color:var(--mut);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.matcard .ma{grid-area:ma;display:flex;align-items:center;padding:6px 9px 8px 0}
+.matcard .ma button{background:#20242d;border:1px solid var(--line);color:var(--err);
+        border-radius:6px;padding:4px 8px;font-size:12px;cursor:pointer}
 .matcard .picktag{position:absolute;top:6px;right:6px;width:20px;height:20px;border-radius:6px;
         background:rgba(0,0,0,.6);border:2px solid #fff;display:flex;align-items:center;justify-content:center;
         font-size:12px;color:#fff}
@@ -1847,9 +1883,6 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   .formgrid textarea{min-height:214px}
   .params{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:4px}
   .params>.grid3,.params>.grid2{display:contents}
-  .statgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
-  .statcol{display:flex;flex-direction:column;gap:14px}
-  .statcol>.card{margin-bottom:0}
   .editgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr);gap:14px}
   .editgrid>.card{margin-bottom:0}
   #taskCard{position:relative}
@@ -1872,8 +1905,6 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   .formgrid>.fcol:last-child{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
   .params{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
   #taskCard>.headacts{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
-  #stClips>.sumacts{gap:6px}
-  #stClips>.sumacts button{padding:6px 8px;font-size:12px}
   .jobsacts{flex-basis:100%}
 }
 .docbody{color:var(--fg);font-size:14px;line-height:1.68}
@@ -2005,7 +2036,6 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
       </div>
     </div>
     <div class="statgrid">
-      <div class="statcol">
       <div class="card" id="stCur">
         <h2>当前分镜</h2>
         <div id="cur"><div class="muted">空闲</div></div>
@@ -2014,14 +2044,6 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
           <pre class="log" id="log"></pre>
         </details>
       </div>
-      <div class="card" id="stJobs">
-        <details class="sec" open>
-          <summary>分镜记录</summary>
-          <div id="jobs" class="muted">暂无</div>
-        </details>
-      </div>
-      </div>
-      <div class="statcol">
       <div class="card" id="matCard">
         <div class="cardhead"><h2>素材库</h2><span class="muted" id="matSub"></span></div>
         <div class="matup">
@@ -2032,18 +2054,12 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
         <div class="muted" id="matMsg" style="margin-top:6px"></div>
         <div id="matGrid" class="matgrid"></div>
       </div>
-      <div class="card" id="stClips">
+      <div class="card" id="stJobs">
         <details class="sec" open>
-          <summary>产物 <span class="muted" id="clipCount"></span></summary>
-          <div id="clips" class="clips"></div>
+          <summary>分镜记录</summary>
+          <div id="jobs" class="muted">暂无</div>
         </details>
-        <span class="sumacts">
-          <button class="ghost" id="clipGoBtn" onclick="openEdit()">剪辑</button>
-          <button class="ghost editonly" id="clipSelAllBtn" onclick="clipToggleAll()">全选</button>
-          <button class="ghost editonly" style="color:var(--err)" onclick="clipDelete()">删除</button>
-          <button class="ghost" id="clipEditBtn" onclick="toggleClipEdit()">编辑</button>
-        </span>
-      </div>
+        <span class="cardacts"><button class="ghost" onclick="openEdit()">剪辑</button></span>
       </div>
     </div>
   </div>
@@ -2197,7 +2213,7 @@ const ASPECTS = __ASPECTS__;
 let logOffset = 0, lastJob = null, jobsById = {}, curStart = 0, curRunning = false;
 let shotName = null, shotCb = null;
 let projects = [], projNames = {}, curProject = null, projectsLoaded = false;
-let clipEdit = false, clipSel = new Set(), clipsCache = [];
+let clipsCache = [];
 let editSeq={aspect:'0',fade_in:0,fade_out:0,clips:[]}, editAvail=[], editLast=null, editLogOff=0;
 let materials=[], pickKind=null, pickSel=new Set(), pickSingle=false, pickMode='mat';
 const selMat={ref_image:[],ref_video:[],ref_audio:[],first_frame:[],last_frame:[]};
@@ -2267,10 +2283,8 @@ function route(){
   if(pid && projNames[pid]!==undefined){
     if(curProject!==pid){ curProject=pid;
       $('jobs')._sig=null; $('jobs').innerHTML='';
-      $('clips')._sig=null; $('clips').innerHTML='';
-      jobsById={}; clipsCache=[]; clipSel.clear(); lastJob=null; logOffset=0; $('log').textContent='';
-      clearSelMat(); materials=[]; $('matGrid').innerHTML='';
-      if(clipEdit){ clipEdit=false; document.querySelector('#stClips .sumacts').classList.remove('editing'); $('clipEditBtn').textContent='编辑'; } }
+      jobsById={}; clipsCache=[]; lastJob=null; logOffset=0; $('log').textContent='';
+      clearSelMat(); materials=[]; $('matGrid').innerHTML=''; }
     $('homeView').style.display='none';
     $('projView').style.display=edit?'none':'';
     $('editView').style.display=edit?'':'none';
@@ -2392,6 +2406,7 @@ function showTaskCard(){
   setTimeout(()=>{ $('taskCard').scrollIntoView({block:'start',behavior:'smooth'}); },30);
 }
 function matUrl(pid,file){ return '/material/'+encodeURIComponent(pid)+'/'+encodeURIComponent(String(file).split('/').pop()); }
+function thumbUrl(pid,file,v){ return '/thumb/'+encodeURIComponent(pid)+'/'+encodeURIComponent(String(file).split('/').pop())+(v?'?v='+v:''); }
 function mediaUrl(jid,pid,p){
   p=String(p);
   if(pid && p.indexOf('/materials/')>=0) return matUrl(pid,p);
@@ -2632,8 +2647,8 @@ function renderSlot(kind){
 }
 function renderAllSlots(){ for(const k in selMat) renderSlot(k); }
 function matPreview(m,pid){
+  if(m.kind==='image') return '<img class="thumb" loading="lazy" src="'+thumbUrl(pid,m.file,m.thumb_v)+'">';
   const u=matUrl(pid,m.file);
-  if(m.kind==='image') return '<img class="thumb" loading="lazy" src="'+u+'">';
   if(m.kind==='video') return '<video class="thumb" muted playsinline preload="metadata" src="'+u+'"></video>';
   return '<div class="thumbicon">'+MAT_KIND_CN[m.kind]+'</div>';
 }
@@ -2648,9 +2663,8 @@ function renderMaterials(){
       d.innerHTML=matPreview(m,pid)+'<div class="mb"><div class="nm" title="'+esc(m.name)+'">'+esc(m.name)+'</div>'+
         '<div class="mm">'+MAT_KIND_CN[m.kind]+' · '+fmtSize(m.size)+(m.exists?'':' · 文件缺失')+'</div></div>';
       const ma=document.createElement('div'); ma.className='ma';
-      const rn=document.createElement('button'); rn.textContent='改名'; rn.onclick=()=>renameMaterial(m.id);
-      const rm=document.createElement('button'); rm.className='rm'; rm.textContent='删除'; rm.onclick=()=>deleteMaterial(m.id);
-      ma.appendChild(rn); ma.appendChild(rm); d.appendChild(ma);
+      const rm=document.createElement('button'); rm.textContent='删除'; rm.onclick=()=>deleteMaterial(m.id);
+      ma.appendChild(rm); d.appendChild(ma);
       box.appendChild(d);
     });
   }
@@ -2687,19 +2701,19 @@ async function uploadMaterial(){
     renderMaterials(); renderAllSlots();
   }catch(e){ $('matMsg').textContent='网络错误'; }
 }
-async function renameMaterial(mid){
-  const m=matById(mid); if(!m) return;
-  const name=await askInput('重命名素材',m.name,'保存','素材名称');
-  if(name==null) return;
-  const r=await fetch('/api/materials/'+encodeURIComponent(curProject)+'/'+encodeURIComponent(mid)+'/rename',
-    {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
-  const j=await r.json().catch(()=>({}));
-  if(!r.ok){ notice('改名失败：'+(j.error||j.msg||r.status)); return; }
-  materials=j.materials||materials; renderMaterials(); renderAllSlots();
-}
 async function deleteMaterial(mid){
   const m=matById(mid); if(!m) return;
-  const ok=await askConfirm('删除素材「<b>'+esc(m.name)+'</b>」？正在使用它的排队/运行分镜可能会失败。','删除素材','删除');
+  const r0=await api('/api/jobs?project='+encodeURIComponent(curProject));
+  const used=((r0&&r0.jobs)||[]).filter(j=>j.mode!=='edit' &&
+    Object.keys(j.media||{}).some(k=>Array.isArray(j.media[k]) &&
+      j.media[k].some(p=>String(p).split('/').pop()===m.file)));
+  let msg='删除素材「<b>'+esc(m.name)+'</b>」？';
+  if(used.length){
+    msg+='<br><br>以下分镜记录用到了该素材：<br>'+
+      used.map(j=>'· '+esc(j.name||j.id)).join('<br>')+
+      '<br><br>删除后这些分镜的素材引用会失效。';
+  }
+  const ok=await askConfirm(msg,'删除素材','删除');
   if(!ok) return;
   const r=await fetch('/api/materials/'+encodeURIComponent(curProject)+'/'+encodeURIComponent(mid)+'/delete',
     {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
@@ -2943,112 +2957,30 @@ async function refreshJobs(){
     else acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'delete\')">删除</button>';
     if(j.clip_rel) acts+=' <button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看</button>';
     acts+=' <button class="ghost" onclick="reuseJob(\''+j.id+'\')">复用</button>';
-    d.innerHTML='<span class="'+stCls(j.status)+'">'+(STATUS_CN[j.status]||j.status)+'</span>'+
+    d.innerHTML=(j.clip_rel? '<video class="jthumb" preload="metadata" muted playsinline src="/files/'+encodeURI(j.clip_rel)+
+        '" onclick="window.play(\''+j.clip_rel+'\')" title="点击播放"></video>' : '')+
       '<span class="meta"><b>'+esc(j.name||j.id)+'</b>'+(j.name?' <span class="muted">'+j.id+'</span>':'')+
-      '<br>'+line2+'<br>'+(note||j.created||'')+'</span>'+
+      '<br>'+line2+'<br>'+(note||j.created||'')+
+      '<br><span class="'+stCls(j.status)+'">'+(STATUS_CN[j.status]||j.status)+'</span></span>'+
       '<span class="jobsacts">'+acts+'</span>';
     box.appendChild(d);
   });
 }
 
 async function jobAct(id,act){
-  const ok=await askConfirm((act==='cancel'?'取消分镜 ':'删除记录 ')+'<b>'+id+'</b>？',
-                            act==='cancel'?'取消分镜':'删除记录', act==='cancel'?'取消':'删除');
+  const isDel=act!=='cancel';
+  const j=jobsById[id]||{};
+  const label=esc(j.name||id)+(j.name?' <span class="muted">'+id+'</span>':'');
+  const ok=await askConfirm((isDel?'删除分镜 ':'取消分镜 ')+'<b>'+label+'</b>？'+
+                            (isDel?'<br>将同时删除其产物视频，不可恢复。':''),
+                            isDel?'删除分镜':'取消分镜', isDel?'删除':'取消');
   if(!ok) return;
-  fetch('/api/jobs/'+id+'/'+act,{method:'POST'}).then(()=>{refreshJobs();refreshOutputs();}); }
+  fetch('/api/jobs/'+id+'/'+act,{method:'POST'}).then(()=>{refreshJobs();refreshOutputs();refreshProjects();}); }
 
 async function refreshOutputs(){
-  if(!curProject) return;
+  if(!curProject){ clipsCache=[]; return; }
   const r=await api('/api/outputs?project='+encodeURIComponent(curProject)); if(!r) return;
   clipsCache=r.clips||[];
-  const box=$('clips');
-  const sig=clipsCache.map(c=>c.rel+'|'+c.size).join('\n');
-  if(box._sig===sig) return;
-  box._sig=sig;
-  if(!clipsCache.length){ box.innerHTML='<span class="muted">暂无产物</span>'; return; }
-  box.innerHTML='';
-  clipsCache.forEach(c=>{
-    const sel=clipSel.has(c.rel);
-    const d=document.createElement('div'); d.className='clip'+(sel?' sel':''); d.dataset.rel=c.rel;
-    d.onclick=()=>{ if(clipEdit) toggleClip(c.rel,d); else play(c.rel); };
-    const pick=clipEdit? '<span class="pick">'+(sel?'\u2713':'')+'</span>' : '';
-    d.innerHTML=pick+'<video preload="metadata" muted playsinline src="/files/'+encodeURI(c.rel)+'"></video>'+
-      '<div class="cap">'+c.name.slice(0,20)+'<br>'+fmtSize(c.size)+' · '+c.ts+'</div>';
-    box.appendChild(d);
-  });
-}
-
-function updClipBar(){
-  const c=$('clipCount'); if(c) c.textContent=clipEdit?('已选 '+clipSel.size):'';
-  const b=$('clipSelAllBtn');
-  if(b){
-    const all=clipsCache.length>0 && clipsCache.every(x=>clipSel.has(x.rel));
-    b.textContent=all?'取消全选':'全选';
-    b.classList.toggle('on',all);
-  }
-}
-function applyClipEditUI(){
-  $('clips').querySelectorAll('.clip').forEach(el=>{
-    if(clipEdit){
-      if(!el.querySelector('.pick')){
-        const pk=document.createElement('span'); pk.className='pick';
-        el.insertBefore(pk, el.firstChild);
-      }
-      const on=clipSel.has(el.dataset.rel);
-      el.classList.toggle('sel',on);
-      el.querySelector('.pick').textContent=on?'\u2713':'';
-    }else{
-      const pk=el.querySelector('.pick'); if(pk) pk.remove();
-      el.classList.remove('sel');
-    }
-  });
-}
-function toggleClipEdit(){
-  clipEdit=!clipEdit; clipSel.clear();
-  document.querySelector('#stClips .sumacts').classList.toggle('editing',clipEdit);
-  $('clipEditBtn').textContent=clipEdit?'完成':'编辑';
-  applyClipEditUI(); updClipBar();
-}
-function toggleClip(rel,el){
-  if(clipSel.has(rel)) clipSel.delete(rel); else clipSel.add(rel);
-  el.classList.toggle('sel',clipSel.has(rel));
-  const pk=el.querySelector('.pick'); if(pk) pk.textContent=clipSel.has(rel)?'\u2713':'';
-  updClipBar();
-}
-function syncClipSel(){
-  $('clips').querySelectorAll('.clip').forEach(el=>{
-    const on=clipSel.has(el.dataset.rel);
-    el.classList.toggle('sel',on);
-    const pk=el.querySelector('.pick'); if(pk) pk.textContent=on?'\u2713':'';
-  });
-  updClipBar();
-}
-function clipToggleAll(){
-  if(clipsCache.length && clipsCache.every(c=>clipSel.has(c.rel))) clipSel.clear();
-  else clipsCache.forEach(c=>clipSel.add(c.rel));
-  syncClipSel();
-}
-function removeClipsLocal(rels){
-  const gone=new Set(rels);
-  $('clips').querySelectorAll('.clip').forEach(el=>{ if(gone.has(el.dataset.rel)) el.remove(); });
-  clipsCache=clipsCache.filter(c=>!gone.has(c.rel));
-  const box=$('clips');
-  if(!clipsCache.length) box.innerHTML='<span class="muted">暂无产物</span>';
-  box._sig=clipsCache.map(c=>c.rel+'|'+c.size).join('\n');
-}
-async function clipDelete(){
-  const rels=[...clipSel];
-  if(!rels.length){ notice('请先选择要删除的产物'); return; }
-  const ok=await askConfirm('确定删除选中的 <b>'+rels.length+'</b> 个产物？删除后不可恢复。','删除产物','删除');
-  if(!ok) return;
-  const r=await fetch('/api/output/delete',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({rels})});
-  const j=await r.json().catch(()=>({}));
-  if(!r.ok){ notice('删除失败：'+(j.error||r.status)); return; }
-  clipSel.clear(); updClipBar();
-  removeClipsLocal(rels);
-  if(clipEdit) toggleClipEdit();
-  refreshProjects(); refreshJobs();
 }
 
 // ---------------------------------------------------------------- timeline
