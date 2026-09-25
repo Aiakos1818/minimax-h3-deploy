@@ -41,7 +41,7 @@ PREVIEW_MAX = 1600
 THUMB_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_thumb.py")
 VTHUMB_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_vthumb.py")
 MODES = ("t2v", "ref2v")
-OUT_SUBDIRS = {"t2v": "t2v", "ref2v": "ref2v", "edit": "edit"}
+OUT_SUBDIRS = {"t2v": "t2v", "ref2v": "ref2v", "edit": "edit", "t2i": "t2i"}
 TRANSITIONS = ("cut", "fade", "dissolve", "push")
 EDIT_ASPECT_OPTS = [("0", "原始画幅"), ("2.39", "2.39:1 宽银幕"), ("16:9", "16:9 横屏"),
                     ("9:16", "9:16 竖屏"), ("1:1", "1:1 方形"), ("4:3", "4:3 横版"),
@@ -324,6 +324,7 @@ _STAGE_LABELS = {
 }
 _STAGE_LINE_RE = re.compile(r"^\[stage\]\s*(\S+)")
 _PROG_RE = re.compile(r"\[progress\]\s+(\d+)/(\d+)")
+_MAT_ID_RE = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{4}$")
 
 
 def _stage_lines(text):
@@ -358,6 +359,7 @@ class Manager:
     def __init__(self, root, driver, comfy_base, password=DEFAULT_PASSWORD):
         self.root = root
         self.driver = os.path.abspath(driver)
+        self.image_driver = os.path.join(os.path.dirname(self.driver), "zimage_runner.py")
         self.password = password
         self.data = os.path.join(root, ".h3ref2v")
         self.jobs_dir = os.path.join(self.data, "jobs")
@@ -460,15 +462,9 @@ class Manager:
                 return False, "项目内仍有运行/排队中的分镜，请先取消"
             if mode == "purge":
                 for j in jobs:
-                    rel = j["st"].get("clip_rel")
-                    if rel:
-                        cand = os.path.realpath(os.path.join(self.out_root, rel))
-                        base = os.path.realpath(self.out_root)
-                        if cand.startswith(base + os.sep) and os.path.isfile(cand):
-                            try:
-                                os.remove(cand)
-                            except OSError:
-                                pass
+                    rels = [r for r in (j["st"].get("clip_rel"), j["st"].get("image_rel")) if r]
+                    if rels:
+                        self.delete_outputs(rels)
                     shutil.rmtree(self._job_dir(j["id"]), ignore_errors=True)
                     del self.jobs[j["id"]]
             else:
@@ -491,7 +487,7 @@ class Manager:
     def project_info(self, pid, jobs=None):
         p = self.projects[pid]
         js = self._project_jobs(pid) if jobs is None else jobs
-        js = [j for j in js if (j["st"].get("mode") or "ref2v") != "edit"]
+        js = [j for j in js if (j["st"].get("mode") or "ref2v") not in ("edit", "t2i")]
         counts = {"total": len(js), "running": 0, "queued": 0}
         cover = None
         cover_ts = ""
@@ -544,8 +540,11 @@ class Manager:
             out.append({"id": m.get("id"), "name": m.get("name") or "",
                         "kind": kind, "file": m.get("file"),
                         "size": m.get("size") or 0, "ts": m.get("ts"),
-                        "thumb_v": v,
-                        "exists": exists})
+                        "gen": m.get("gen"), "prompt": m.get("prompt"),
+                        "aspect": m.get("aspect"), "megapixels": m.get("megapixels"),
+                        "steps": m.get("steps"),
+                        "seed": (None if m.get("seed") is None else str(m.get("seed"))),
+                        "thumb_v": v, "exists": exists})
         return out
 
     def material_path(self, pid, mid):
@@ -638,7 +637,18 @@ class Manager:
             return None, "素材名称不能包含斜杠"
         return name, None
 
-    def add_material(self, pid, name, filename, content):
+    def _unique_mat_name(self, pid, base):
+        base = re.sub(r"\s+", " ", (base or "").strip())
+        base = base.replace("/", "／").replace("\\", "＼")[:40] or "图片"
+        used = {(m.get("name") or "") for m in ((self.projects.get(pid) or {}).get("materials") or [])}
+        if base not in used:
+            return base
+        i = 2
+        while ("%s %d" % (base, i)) in used:
+            i += 1
+        return "%s %d" % (base, i)
+
+    def add_material(self, pid, name, filename, content, gen=None, meta=None):
         name, err = self._mat_name_ok(name)
         if err:
             return None, err
@@ -648,7 +658,7 @@ class Manager:
             return None, "不支持的文件类型：%s" % (ext or "未知")
         if not content:
             return None, "文件内容为空"
-        mid = "m" + uuid.uuid4().hex[:8]
+        mid = self.new_id()
         stored = mid + ext
         with self.lock:
             p = self.projects.get(pid)
@@ -661,7 +671,10 @@ class Manager:
             with open(os.path.join(d, stored), "wb") as f:
                 f.write(content)
             mat = {"id": mid, "name": name, "kind": kind, "file": stored,
-                   "size": len(content), "ts": NOW()}
+                   "size": len(content), "ts": NOW(), "gen": gen}
+            for k in ("prompt", "aspect", "megapixels", "steps", "seed"):
+                if meta and meta.get(k) is not None:
+                    mat[k] = meta[k]
             p.setdefault("materials", []).append(mat)
             self._write_project(p)
         return mat, None
@@ -726,6 +739,49 @@ class Manager:
                                  err="web 重启中断,需要重新提交")
                 self.persist_status(job)
             self.jobs[d] = job
+        self._backfill_gen()
+
+    def _backfill_gen(self):
+        """Mark materials produced by t2i jobs before the gen flag existed."""
+        changed = set()
+        for job in self.jobs.values():
+            st = job.get("st") or {}
+            if st.get("mode") != "t2i":
+                continue
+            mid = st.get("material_id")
+            pid = st.get("project") or (job.get("cfg") or {}).get("project")
+            if not mid or pid not in self.projects:
+                continue
+            params = st.get("params") or {}
+            meta = {"prompt": params.get("prompt"), "aspect": params.get("aspect"),
+                    "megapixels": params.get("megapixels"), "steps": params.get("steps"),
+                    "seed": st.get("seed")}
+            for m in (self.projects[pid].get("materials") or []):
+                if m.get("id") != mid:
+                    continue
+                upd = False
+                if not m.get("gen"):
+                    m["gen"] = "t2i"; upd = True
+                for k, v in meta.items():
+                    if m.get(k) is None and v is not None:
+                        m[k] = v; upd = True
+                if not _MAT_ID_RE.match(m.get("id") or ""):
+                    m["id"] = self._mat_id_from_ts(m.get("ts"))
+                    st["material_id"] = m["id"]
+                    self.persist_status(job)
+                    upd = True
+                if upd:
+                    changed.add(pid)
+        for pid in changed:
+            self._write_project(self.projects[pid])
+
+    def _mat_id_from_ts(self, ts):
+        try:
+            base = time.strftime("%Y%m%d_%H%M%S",
+                                 time.strptime(ts or "", "%Y-%m-%d %H:%M:%S"))
+        except Exception:
+            base = time.strftime("%Y%m%d_%H%M%S")
+        return base + "_" + uuid.uuid4().hex[:4]
 
     def new_id(self):
         return time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4]
@@ -826,6 +882,15 @@ class Manager:
     def _build_argv(self, cfg):
         p = cfg["params"]
         mode = cfg.get("mode", "ref2v")
+        if mode == "t2i":
+            a = [sys.executable, self.image_driver, "--tag", cfg["tag"],
+                 "--prompt", p["prompt"], "--aspect", p["aspect"],
+                 "--megapixels", str(p["megapixels"]), "--steps", str(p["steps"]),
+                 "--out", os.path.join(self._out_dir("t2i", cfg.get("project")),
+                                       "%s.png" % cfg["tag"])]
+            if cfg.get("seed") is not None:
+                a += ["--seed", str(cfg["seed"])]
+            return a
         a = [sys.executable, self.driver, "--mode", mode, "--tag", cfg["tag"],
              "--prompt", p["prompt"],
              "--dur", str(p["dur"]), "--aspect", p["aspect"],
@@ -870,7 +935,8 @@ class Manager:
                     self._set(jid, "status", "cancelled", ended=NOW(), err="取消(等待中)")
                     return
             os.makedirs(self._out_dir(mode, cfg.get("project")), exist_ok=True)
-            out_path = os.path.join(self._out_dir(mode, cfg.get("project")), "%s.mp4" % cfg["tag"])
+            ext = "png" if mode == "t2i" else "mp4"
+            out_path = os.path.join(self._out_dir(mode, cfg.get("project")), "%s.%s" % (cfg["tag"], ext))
             argv = self._edit_argv(cfg, out_path) if mode == "edit" else self._build_argv(cfg)
             log.write("cmd: %s\n\n" % " ".join(argv)); log.flush()
             env = dict(os.environ, PYTHONUNBUFFERED="1")
@@ -899,7 +965,10 @@ class Manager:
                           err="已取消")
                 log.write("\n[web] cancelled rc=%s\n" % rc)
             elif rc == 0:
-                p = os.path.join(self._out_dir(mode, cfg.get("project")), "%s.mp4" % cfg["tag"])
+                p = os.path.join(self._out_dir(mode, cfg.get("project")), "%s.%s" % (cfg["tag"], ext))
+                if mode == "t2i":
+                    self._finish_image(jid, cfg, job, p, log)
+                    log.flush(); return
                 rel = os.path.relpath(p, self.out_root).replace("\\", "/")
                 size = os.path.getsize(p) if os.path.isfile(p) else 0
                 frames = self._edit_total_frames(job) if mode == "edit" \
@@ -915,6 +984,36 @@ class Manager:
                           err="runner exited rc=%s" % rc)
                 log.write("\n[web] failed rc=%s\n" % rc)
             log.flush()
+
+    def _finish_image(self, jid, cfg, job, p, log):
+        """A t2i job succeeded: store the PNG as an image material."""
+        project = cfg.get("project", DEFAULT_PROJECT)
+        try:
+            with open(p, "rb") as f:
+                content = f.read()
+        except OSError:
+            content = b""
+        if not content:
+            self._set(jid, "status", "failed", ended=NOW(), err="未产出图片")
+            log.write("\n[web] failed: no png\n"); return
+        base = cfg.get("name") or cfg["params"].get("prompt") or "图片"
+        name = self._unique_mat_name(project, base)
+        p = cfg["params"]
+        meta = {"prompt": p.get("prompt"), "aspect": p.get("aspect"),
+                "megapixels": p.get("megapixels"), "steps": p.get("steps"),
+                "seed": cfg.get("seed")}
+        mat, err = self.add_material(project, name, "%s.png" % cfg["tag"], content,
+                                     gen="t2i", meta=meta)
+        if err:
+            self._set(jid, "status", "failed", ended=NOW(), err=err)
+            log.write("\n[web] failed: %s\n" % err); return
+        rel = os.path.relpath(p, self.out_root).replace("\\", "/")
+        self._set(jid, "status", "done", ended=NOW(), exit=0, err=None,
+                  duration=int(time.time() - job["st"].get("created_ts", time.time())),
+                  image_rel=rel, clip_size=len(content),
+                  material_id=mat["id"], material_name=mat["name"])
+        log.write("\n[web] done rc=0 material=%s image=%s size=%d\n"
+                  % (mat["id"], rel, len(content)))
 
     def _term(self, job):
         child = job.get("child")
@@ -954,7 +1053,8 @@ class Manager:
             if not cfg or not cfg.get("params"):
                 return False, "缺少参数，无法重新生成"
             for k in ("progress", "detail", "clip_rel", "clip_size", "clip_frames",
-                      "clip_seconds", "duration", "ended", "err"):
+                      "clip_seconds", "duration", "ended", "err",
+                      "image_rel", "material_id", "material_name"):
                 st.pop(k, None)
             st.update(status="queued", created=NOW(), created_ts=time.time(),
                       stage=None, cancel_requested=False, tag=jid)
@@ -978,10 +1078,13 @@ class Manager:
                 self.queue = [x for x in self.queue if x != jid]
                 job["st"].update(status="cancelled", ended=NOW())
             rel = job["st"].get("clip_rel")
+            img_rel = job["st"].get("image_rel")
             shutil.rmtree(self._job_dir(jid), ignore_errors=True)
             del self.jobs[jid]
         if rel:
             self.delete_outputs([rel])
+        if img_rel:
+            self.delete_outputs([img_rel])
         return True, "已删除分镜及其产物"
 
     # ---- snapshots ----
@@ -1000,6 +1103,8 @@ class Manager:
                 "params": st.get("params"), "media": st.get("media"),
                 "clip_rel": st.get("clip_rel"), "clip_size": st.get("clip_size"),
                 "clip_frames": st.get("clip_frames"), "clip_seconds": st.get("clip_seconds"),
+                "image_rel": st.get("image_rel"),
+                "material_id": st.get("material_id"), "material_name": st.get("material_name"),
                 "cancel_requested": bool(st.get("cancel_requested"))}
 
     def state(self):
@@ -1544,6 +1649,13 @@ def make_handler(mgr):
                 ok, text = llm_optimize(prompt, js.get("counts") or {})
                 self._json(200, {"ok": True, "text": text}) if ok else self._err(502, text)
                 return
+            if u.path == "/api/images":
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    js = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                except Exception:
+                    self._err(400, "bad json"); return
+                self._api_image(js); return
             if u.path == "/api/materials":
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
@@ -1710,6 +1822,39 @@ def make_handler(mgr):
                     total_bytes / 1048576, MAX_REQUEST_MB)
             return None
 
+        def _api_image(self, js):
+            project = (js.get("project") or DEFAULT_PROJECT) or DEFAULT_PROJECT
+            if project not in mgr.projects:
+                self._err(400, "项目不存在"); return
+            prompt = (js.get("prompt") or "").strip()
+            if not prompt:
+                self._err(400, "请填写提示词"); return
+            if len(prompt) > 4000:
+                self._err(400, "提示词过长（>4000 字符）"); return
+            aspect = js.get("aspect") or ASPECTS[0]
+            if aspect not in ASPECTS:
+                aspect = ASPECTS[0]
+            seed = _to_int(js.get("seed"), None, lo=0, hi=2**63 - 1)
+            if seed is None:
+                seed = random.randint(0, 2**63 - 1)
+            cfg = {
+                "mode": "t2i", "project": project,
+                "name": (js.get("name") or "").strip()[:60], "tag": None, "seed": seed,
+                "params": {
+                    "prompt": prompt, "aspect": aspect,
+                    "megapixels": _to_float(js.get("megapixels"), 0.4, lo=0.1, hi=2.0),
+                    "multiple": 16,
+                    "steps": _to_int(js.get("steps"), 8, lo=1, hi=50),
+                    "dur": 0,
+                },
+                "media": {},
+            }
+            jid = mgr.new_id()
+            cfg["tag"] = jid
+            os.makedirs(mgr._job_dir(jid), exist_ok=True)
+            mgr.submit(cfg, jid=jid)
+            self._json(202, {"id": jid, "status": "queued"})
+
     return H
 
 
@@ -1839,7 +1984,9 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .matup #matFile{flex:1 1 260px;min-width:0;padding:7px 10px;font-size:13px}
 .matgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-top:12px;align-items:start}
 .matgroups{display:flex;flex-direction:column;gap:16px;margin-top:12px}
-.matgrouphead{font-size:13px;color:var(--mut);font-weight:600;margin-bottom:8px}
+.matgrouphead{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;color:var(--mut);font-weight:600;margin-bottom:8px}
+.matgrouphead .ghost{padding:3px 10px;font-size:12.5px}
+#imgStatus:empty{display:none}
 .matgroups .matgrid{margin-top:0}
 .matcard{background:#0e1116;border:1px solid var(--line);border-radius:10px;overflow:hidden;
          display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"thumb thumb" "mb ma";position:relative}
@@ -1905,8 +2052,8 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   .params>.grid3,.params>.grid2{display:contents}
   .editgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr);gap:14px}
   .editgrid>.card{margin-bottom:0}
-  #taskCard{position:relative}
-  #taskCard>.headacts{position:absolute;top:14px;right:14px}
+  #taskCard,#imgTaskCard{position:relative}
+  #taskCard>.headacts,#imgTaskCard>.headacts{position:absolute;top:14px;right:14px}
 }
 @media(max-width:980px){.cols{grid-template-columns:1fr}
   #projHead .cardhead{flex-wrap:wrap}
@@ -1925,6 +2072,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   .formgrid>.fcol:last-child{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
   .params{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
   #taskCard>.headacts{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
+  #imgTaskCard>.headacts{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
   .jobsacts{flex-basis:100%}
 }
 </style>
@@ -2030,6 +2178,53 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
         <button class="ghost" onclick="resetForm()">重置</button>
         <button class="ghost" onclick="cancelShot()">取消</button>
       </div>
+    </div>
+    <div class="card" id="imgTaskCard" style="display:none">
+      <div class="cardhead modehead">
+        <h2>新建图片素材</h2>
+        <select id="imgMode" onchange="onImgModeChange()">
+          <option value="t2i">文生图</option>
+          <option value="i2i">图生图</option>
+        </select>
+      </div>
+      <div class="muted" id="imgNameLabel" style="margin-bottom:8px"></div>
+      <div id="imgT2I">
+        <div class="formgrid">
+          <div class="fcol">
+            <div class="grid2">
+              <div><label>画幅</label><select id="imgAspect"></select></div>
+              <div><label>分辨率(MP)</label>
+                <select id="imgMegapixels">
+                  <option value="0.2">0.2</option><option value="0.3">0.3</option>
+                  <option value="0.4" selected>0.4</option><option value="0.5">0.5</option>
+                  <option value="0.6">0.6</option><option value="0.8">0.8</option>
+                  <option value="1.0">1.0</option>
+                </select></div>
+            </div>
+            <div class="grid2" style="margin-top:10px">
+              <div><label>步数</label><input id="imgSteps" type="number" value="8" min="1" max="50"></div>
+              <div class="fseed"><label>seed(空=随机)</label><input id="imgSeed" type="number" placeholder="随机"></div>
+            </div>
+          </div>
+          <div class="fcol">
+            <label>提示词</label>
+            <textarea id="imgPrompt" placeholder="Cinematic ... "></textarea>
+          </div>
+        </div>
+      </div>
+      <div id="imgI2I" style="display:none"><div class="muted">图生图开发中，敬请期待。</div></div>
+      <div class="headacts">
+        <button class="primary" id="imgSubmitBtn" onclick="submitImage()">提交</button>
+        <button class="ghost" onclick="resetImageForm()">重置</button>
+        <button class="ghost" onclick="cancelImageMaterial()">取消</button>
+      </div>
+    </div>
+    <div class="card" id="imgCard" style="display:none">
+      <details class="sec" open>
+        <summary onclick="toggleSec(event)"><span class="setoggle">图片素材列表</span></summary>
+        <div class="muted" id="imgStatus" style="margin-bottom:8px"></div>
+        <div id="imgList"></div>
+      </details>
     </div>
     <div class="statgrid">
       <div class="card" id="matCard">
@@ -2205,7 +2400,7 @@ const $ = (id)=>document.getElementById(id);
 const esc = (s)=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ASPECTS = __ASPECTS__;
 let logOffset = 0, lastJob = null, jobsById = {};
-let shotName = null, shotCb = null;
+let shotName = null, shotCb = null, shotMode = 'shot', imgName = null;
 let projects = [], projNames = {}, curProject = null, projectsLoaded = false;
 let clipsCache = [];
 let editSeq={aspect:'0',fade_in:0,fade_out:0,clips:[]}, editAvail=[], editLast=null, editLogOff=0;
@@ -2222,7 +2417,8 @@ const SLOT_MEDIA={ref_image:'image',ref_video:'video',ref_audio:'audio',
 const MAT_KIND_CN={image:'图片',video:'视频',audio:'音频'};
 const STATUS_CN = {queued:'排队中', running:'进行中', done:'已完成', failed:'失败', cancelled:'已取消', interrupted:'已中断'};
 const MEDIA_CN = {ref_image:'图', ref_video:'视频', ref_audio:'音频'};
-const MODE_CN = {t2v:'文生视频', ref2v:'参考生视频', edit:'剪辑成片'};
+const MODE_CN = {t2v:'文生视频', ref2v:'参考生视频', edit:'剪辑成片', t2i:'文生图'};
+const GEN_CN = {t2i:'文生图', i2i:'图生图'};
 const TRANS_CN = {cut:'硬切', fade:'黑场渐隐', dissolve:'交叉溶解', push:'推进/滑动'};
 const EDIT_ASPECTS = [['0','原始画幅'],['2.39','2.39:1 宽银幕'],['16:9','16:9 横屏'],
   ['9:16','9:16 竖屏'],['1:1','1:1 方形'],['4:3','4:3 横版'],['3:4','3:4 竖版']];
@@ -2264,13 +2460,23 @@ async function refreshProjects(){
 function renderProjHead(){
   const p=projects.find(x=>x.id===curProject); if(!p){ return; }
   const canEdit=(curProject!=='default');
+  const creator=$('imgCard') && $('imgCard').style.display!=='none';
+  const sub = creator
+    ? (materials.filter(m=>m.kind==='image' && m.gen).length+' 个图片素材')
+    : projSub(p);
+  const sig=[p.id,p.name,canEdit?1:0,creator?1:0,sub].join('|');
+  if($('projHead')._sig===sig) return;
+  $('projHead')._sig=sig;
+  const bcbar = creator
+    ? '<button class="ghost" onclick="closeImageCreator()">返回</button>'
+    : (canEdit?'<button class="ghost" onclick="renameProject()">改名</button>'+
+       '<button class="ghost" onclick="deleteProject()">删除</button>':'')+
+      '<button class="ghost" onclick="goHome()">全部项目</button>';
   $('projHead').innerHTML='<div class="cardhead"><h2 style="color:var(--fg);font-size:16px">'+esc(p.name)+'</h2>'+
-    '<span class="bcbar">'+
-      (canEdit?'<button class="ghost" onclick="renameProject()">改名</button>'+
-      '<button class="ghost" onclick="deleteProject()">删除</button>':'')+
-      '<button class="ghost" onclick="goHome()">全部项目</button></span></div>'+
-    '<div class="projsub"><span class="muted">'+esc(projSub(p))+'</span>'+
-      '<button class="ghost" onclick="addShot()">添加分镜</button></div>';
+    '<span class="bcbar">'+bcbar+'</span></div>'+
+    '<div class="projsub"><span class="muted">'+esc(sub)+'</span>'+
+      (creator?'<button class="ghost" onclick="addImageMaterial()">添加图片素材</button>'
+              :'<button class="ghost" onclick="addShot()">添加分镜</button>')+'</div>';
 }
 function openProject(pid){ location.hash='#/p/'+encodeURIComponent(pid); }
 function openEdit(){ if(curProject) location.hash='#/p/'+encodeURIComponent(curProject)+'/edit'; }
@@ -2286,7 +2492,10 @@ function route(){
       jobsById={}; clipsCache=[]; lastJob=null; logOffset=0; $('log').textContent='';
       clearSelMat(); materials=[]; $('matGrid')._sig=null; $('matGrid').innerHTML='';
       $('matCard').querySelector('details').open=false;
-      $('stJobs').querySelector('details').open=true; }
+      $('stJobs').querySelector('details').open=true;
+      $('imgCard').style.display='none'; $('matCard').style.display=''; $('stJobs').style.display='';
+      $('imgTaskCard').style.display='none'; $('imgStatus').textContent=''; imgName=null; imgJobId=null;
+      $('imgCard').querySelector('details').open=true; }
     $('homeView').style.display='none';
     $('projView').style.display=edit?'none':'';
     $('editView').style.display=edit?'':'none';
@@ -2381,9 +2590,10 @@ function askInput(title,value,okText,ph){
   });
 }
 function inputResolve(v){ $('inputModal').classList.remove('open'); const cb=inputCb; inputCb=null; if(cb) cb(v); }
-function openShotModal(title,value,okText,cb){
-  shotCb=cb;
+function openShotModal(title,value,okText,cb,mode){
+  shotCb=cb; shotMode=(mode==='image')?'image':'shot';
   $('shotTitle').textContent=title||'添加分镜';
+  $('shotVal').placeholder=(shotMode==='image')?'素材名（项目内唯一）':'分镜名（项目内唯一）';
   $('shotOk').textContent=okText||'确定';
   $('shotVal').value=value||'';
   $('shotMsg').textContent='';
@@ -2394,11 +2604,16 @@ function closeShotModal(){ $('shotModal').classList.remove('open'); shotCb=null;
 async function confirmShot(){
   if(!curProject) return;
   const name=$('shotVal').value.trim();
-  if(!name){ $('shotMsg').textContent='请填写分镜名'; return; }
-  if(name.length>60){ $('shotMsg').textContent='分镜名过长（>60 字符）'; return; }
-  const r=await api('/api/jobs?project='+encodeURIComponent(curProject));
-  const used=((r&&r.jobs)||[]).some(j=>j.mode!=='edit' && (j.name||'')===name);
-  if(used){ $('shotMsg').textContent='已存在同名分镜，请换一个名字'; return; }
+  if(!name){ $('shotMsg').textContent=shotMode==='image'?'请填写素材名':'请填写分镜名'; return; }
+  if(name.length>60){ $('shotMsg').textContent=(shotMode==='image'?'素材名':'分镜名')+'过长（>60 字符）'; return; }
+  if(shotMode==='image'){
+    await refreshMaterials();
+    if(materials.some(m=>(m.name||'')===name)){ $('shotMsg').textContent='已存在同名素材，请换一个名字'; return; }
+  }else{
+    const r=await api('/api/jobs?project='+encodeURIComponent(curProject));
+    const used=((r&&r.jobs)||[]).some(j=>j.mode!=='edit' && (j.name||'')===name);
+    if(used){ $('shotMsg').textContent='已存在同名分镜，请换一个名字'; return; }
+  }
   const cb=shotCb; shotCb=null; $('shotModal').classList.remove('open');
   if(cb) cb(name);
 }
@@ -2589,6 +2804,8 @@ function fmtDur(sec){ sec=Math.max(0,Math.floor(sec)); return String(Math.floor(
 
 for (const a of ASPECTS){ const o=document.createElement('option'); o.value=a; o.textContent=a; $('aspect').appendChild(o); }
 $('aspect').value = ASPECTS[0];
+for (const a of ASPECTS){ const o=document.createElement('option'); o.value=a; o.textContent=a; $('imgAspect').appendChild(o); }
+$('imgAspect').value = ASPECTS[0];
 
 function fmtSize(n){ if(n>1048576) return (n/1048576).toFixed(1)+'MB'; if(n>1024) return (n/1024).toFixed(0)+'KB'; return n+'B'; }
 function stCls(s){ return 'st '+s; }
@@ -2690,7 +2907,12 @@ function renderMaterials(){
       const list=materials.filter(m=>m.kind===kind);
       const sec=document.createElement('div'); sec.className='matgroup';
       const hd=document.createElement('div'); hd.className='matgrouphead';
-      hd.textContent=label+' ('+list.length+')';
+      if(kind==='image'){
+        hd.innerHTML='<span>'+label+' ('+list.length+')</span>'+
+          '<button class="ghost" onclick="openImageCreator()">创作图片素材</button>';
+      }else{
+        hd.textContent=label+' ('+list.length+')';
+      }
       sec.appendChild(hd);
       if(!list.length){ box.appendChild(sec); return; }
       const g=document.createElement('div'); g.className='matgrid';
@@ -2725,6 +2947,8 @@ function renderMaterials(){
     });
   }
   $('matSub').textContent=materials.length? (materials.length+' 个素材') : '';
+  renderImageList();
+  renderProjHead();
 }
 async function refreshMaterials(){
   if(!curProject) return;
@@ -2732,6 +2956,158 @@ async function refreshMaterials(){
   if(!r) return;
   materials=r.materials||[];
   renderMaterials(); renderAllSlots();
+}
+// ---- image material creator (文生图) ----
+let imgJobId=null;
+function onImgModeChange(){
+  const m=$('imgMode').value;
+  $('imgT2I').style.display=(m==='t2i')?'':'none';
+  $('imgI2I').style.display=(m==='i2i')?'':'none';
+  $('imgSubmitBtn').disabled=(m!=='t2i');
+}
+function openImageCreator(){
+  if(!curProject){ notice('请先进入一个项目'); return; }
+  $('matCard').style.display='none';
+  $('stJobs').style.display='none';
+  $('imgCard').style.display='';
+  $('imgTaskCard').style.display='none';
+  $('imgStatus').textContent='';
+  imgName=null;
+  $('imgList')._sig=null;
+  renderImageList();
+  renderProjHead();
+  setTimeout(()=>{ $('imgCard').scrollIntoView({block:'start',behavior:'smooth'}); },30);
+}
+function closeImageCreator(){
+  cancelImageMaterial();
+  $('imgCard').style.display='none';
+  $('matCard').style.display='';
+  $('stJobs').style.display='';
+  renderProjHead();
+}
+function addImageMaterial(){
+  if(!curProject){ notice('请先进入一个项目'); return; }
+  openShotModal('添加图片素材','','确定',(name)=>{ imgName=name; showImgForm(); },'image');
+}
+function showImgForm(){
+  $('imgTaskCard').style.display='';
+  $('imgNameLabel').textContent=imgName? ('素材名：'+imgName) : '';
+  $('imgStatus').textContent='';
+  $('imgSubmitBtn').disabled=false;
+  setTimeout(()=>{ $('imgTaskCard').scrollIntoView({block:'start',behavior:'smooth'}); },30);
+}
+async function resetImageForm(){
+  const ok=await askConfirm('清空当前填写的内容并恢复默认参数？','重置','清空');
+  if(!ok) return;
+  clearImageForm();
+}
+function clearImageForm(){
+  $('imgPrompt').value=''; $('imgSeed').value='';
+  $('imgSteps').value=8; $('imgMegapixels').value='0.4'; $('imgAspect').value=ASPECTS[0];
+  $('imgMode').value='t2i'; onImgModeChange();
+  $('imgStatus').textContent='';
+}
+function cancelImageMaterial(){
+  imgName=null;
+  $('imgTaskCard').style.display='none';
+  clearImageForm();
+}
+function renderImageList(){
+  const box=$('imgList'); if(!box) return;
+  const list=materials.filter(m=>m.kind==='image' && m.gen);
+  const sig=list.map(m=>[m.id,m.name,m.gen,m.exists?1:0].join(',')).join('\n');
+  if(box._sig===sig) return;
+  box._sig=sig; box.innerHTML='';
+  if(!list.length){ box.innerHTML='<div class="matempty">还没有生成的图片素材，用上面的文生图生成。</div>'; return; }
+  const pid=curProject;
+  list.forEach(m=>{
+    const nm=matSaveName(m), gen=GEN_CN[m.gen]||m.gen||'生成';
+    const st=m.exists? '<span class="st done">已完成</span>' : '<span class="st failed">文件缺失</span>';
+    const d=document.createElement('div'); d.className='job';
+    d.innerHTML='<img class="jthumb" loading="lazy" title="'+esc(nm)+'" src="'+thumbUrl(pid,m.file,m.thumb_v,nm)+'">'+
+      '<span class="meta"><b>'+esc(m.name)+'</b><br><b>'+esc(m.id)+'</b><br>'+
+        esc(gen)+' · '+fmtSize(m.size)+'<br>'+esc(m.ts||'')+'<br>'+st+'</span>'+
+      '<span class="jobsacts"><button class="ghost">详情</button> <button class="ghost">删除</button> '+
+        '<button class="ghost">查看</button> <button class="ghost">复用</button></span>';
+    const im=d.querySelector('img.jthumb'); if(im) im.onclick=()=>viewMaterial(m.id);
+    const btns=d.querySelectorAll('.jobsacts button');
+    btns[0].onclick=()=>detailMaterial(m.id);
+    btns[1].onclick=()=>deleteMaterial(m.id);
+    btns[2].onclick=()=>viewMaterial(m.id);
+    btns[3].onclick=()=>reuseMaterial(m.id);
+    box.appendChild(d);
+  });
+}
+function detailMaterial(mid){
+  const m=matById(mid); if(!m) return;
+  const row=(k,v)=>'<div class="detrow"><span class="muted">'+k+'</span><span>'+v+'</span></div>';
+  let h='';
+  h+=row('素材名', esc(m.name));
+  h+=row('ID', esc(m.id));
+  h+=row('类型', esc(GEN_CN[m.gen]||'图片'));
+  h+=row('大小', fmtSize(m.size));
+  h+=row('生成时间', esc(m.ts||'-'));
+  if(m.aspect) h+=row('画幅', esc(m.aspect));
+  if(m.megapixels!=null) h+=row('分辨率', m.megapixels+' MP');
+  if(m.steps!=null) h+=row('步数', m.steps);
+  if(m.seed!=null) h+=row('seed', String(m.seed));
+  if(m.prompt) h+='<div style="margin-top:12px"><div class="muted">提示词</div><div class="detprompt">'+esc(m.prompt)+'</div></div>';
+  $('jTitle').textContent='图片素材详情 · '+m.name;
+  $('jBody').innerHTML=h;
+  $('jobModal').classList.add('open');
+}
+function suggestName(base){
+  base=String(base||'图片'); let i=2;
+  while(materials.some(x=>(x.name||'')===(base+'-'+i))) i++;
+  return base+'-'+i;
+}
+function reuseMaterial(mid){
+  const m=matById(mid); if(!m) return;
+  if(!curProject){ notice('请先进入一个项目'); return; }
+  if(!m.prompt){ notice('该素材没有可复用的生成参数'); return; }
+  openShotModal('复用图片素材', suggestName(m.name), '确定', (name)=>{ imgName=name; showImgForm(); prefillImageForm(m); },'image');
+}
+function prefillImageForm(m){
+  $('imgMode').value='t2i'; onImgModeChange();
+  $('imgPrompt').value=m.prompt||'';
+  if(m.aspect) $('imgAspect').value=m.aspect;
+  if(m.megapixels!=null) $('imgMegapixels').value=m.megapixels;
+  if(m.steps!=null) $('imgSteps').value=m.steps;
+  $('imgSeed').value='';
+}
+async function submitImage(){
+  if(!curProject){ notice('请先进入一个项目'); return; }
+  if(!imgName){ notice('请先添加图片素材并填写素材名'); return; }
+  if($('imgMode').value!=='t2i'){ notice('图生图开发中，敬请期待'); return; }
+  const prompt=$('imgPrompt').value.trim();
+  if(!prompt){ notice('请填写提示词'); return; }
+  const body={project:curProject, name:imgName, prompt:prompt, aspect:$('imgAspect').value,
+    megapixels:$('imgMegapixels').value, steps:$('imgSteps').value};
+  if($('imgSeed').value) body.seed=$('imgSeed').value;
+  $('imgSubmitBtn').disabled=true; $('imgStatus').textContent='提交中…';
+  try{
+    const r=await fetch('/api/images',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)});
+    const j=await r.json().catch(()=>({}));
+    if(r.status!==202){ $('imgStatus').textContent='提交失败：'+(j.error||r.status); $('imgSubmitBtn').disabled=false; return; }
+    imgJobId=j.id; $('imgPrompt').value=''; $('imgSeed').value='';
+    $('imgTaskCard').style.display='none'; imgName=null;
+    $('imgStatus').textContent='已提交：'+j.id+'（排队中…）';
+  }catch(e){ $('imgStatus').textContent='网络错误'; }
+  $('imgSubmitBtn').disabled=false;
+}
+async function imgTick(){
+  const card=$('imgCard');
+  if(!card || card.style.display==='none') return;
+  await refreshMaterials();
+  if(!imgJobId) return;
+  const j=await api('/api/jobs/'+encodeURIComponent(imgJobId));
+  if(!j) return;
+  if(j.status==='running') $('imgStatus').textContent='生成中… '+((j.stage&&j.stage.label)||'')+(j.progress?(' '+j.progress.cur+'/'+j.progress.total):'');
+  else if(j.status==='queued') $('imgStatus').textContent='排队中…';
+  else if(j.status==='done'){ $('imgStatus').textContent='已生成并加入图片素材：'+(j.material_name||''); imgJobId=null; }
+  else if(j.status==='failed'){ $('imgStatus').textContent='生成失败：'+friendlyErr(j.err); imgJobId=null; }
+  else if(j.status==='cancelled'||j.status==='interrupted'){ $('imgStatus').textContent='已取消/中断'; imgJobId=null; }
 }
 function onMatFileChange(){
   const f=$('matFile').files[0]; if(!f) return;
@@ -3024,7 +3400,7 @@ async function refreshJobs(){
   if(!curProject) return;
   const r=await api('/api/jobs?project='+encodeURIComponent(curProject)); if(!r) return;
   const box=$('jobs');
-  const jobs=r.jobs.filter(j=>j.mode!=='edit').slice(0,50);
+  const jobs=r.jobs.filter(j=>j.mode!=='edit' && j.mode!=='t2i').slice(0,50);
   const sig=jobs.map(j=>[j.id,j.name||'',j.status,(j.stage&&j.stage.label)||'',
     (j.progress&&j.progress.cur)||'',(j.progress&&j.progress.total)||'',
     j.duration!=null?j.duration:'',j.clip_rel||'',j.err||'',j.mode||''].join(',')).join('\n');
@@ -3367,6 +3743,7 @@ onModeChange();
 refreshState();
 setInterval(refreshState,2000); setInterval(refreshProjects,5000);
 setInterval(refreshJobs,5000); setInterval(refreshOutputs,5000); setInterval(pollLog,1500);
+setInterval(imgTick,3000);
 setInterval(()=>{ const v=$('editView'); if(v && v.style.display!=='none') editTick(); },1500);
 </script>
 </body>
