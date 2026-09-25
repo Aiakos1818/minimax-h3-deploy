@@ -43,6 +43,7 @@ THUMB_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_th
 VTHUMB_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_vthumb.py")
 MODES = ("t2v", "ref2v")
 IMAGE_MODES = ("t2i", "i2i")
+IMAGE_MODELS = ("zimage", "qwen")
 OUT_SUBDIRS = {"t2v": "t2v", "ref2v": "ref2v", "edit": "edit", "t2i": "t2i", "i2i": "i2i"}
 TRANSITIONS = ("cut", "fade", "dissolve", "push")
 EDIT_ASPECT_OPTS = [("0", "原始画幅"), ("2.39", "2.39:1 宽银幕"), ("16:9", "16:9 横屏"),
@@ -289,6 +290,18 @@ class ComfyHealth:
         except Exception:
             return None
 
+    def free_vram(self):
+        """Unload cached models and release the caching allocator, so another engine
+        (Qwen-Image-2.1) can own both GPUs."""
+        try:
+            data = json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8")
+            req = urllib.request.Request(self.base + "/free", data=data, method="POST",
+                                         headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=15).read()
+            return True
+        except Exception:
+            return False
+
     def interrupt(self):
         """Ask ComfyUI to interrupt the current prompt and clear its pending queue."""
         try:
@@ -323,6 +336,7 @@ _STAGE_LABELS = {
     "load_clip": "加载 CLIP 文本编码器",
     "encode_clip": "CLIP 编码(提示词/参考)",
     "load_vae": "加载/解码 VAE",
+    "load_model": "加载 Qwen-Image-2.1(双卡)",
 }
 _STAGE_LINE_RE = re.compile(r"^\[stage\]\s*(\S+)")
 _PROG_RE = re.compile(r"\[progress\]\s+(\d+)/(\d+)")
@@ -332,7 +346,7 @@ _MAT_ID_RE = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{4}$")
 def _stage_lines(text):
     return [l for l in text.splitlines()
             if l.strip() and "[progress]" not in l
-            and not l.startswith(("cmd:", "=== job", "[web]", "[comfy]"))]
+            and not l.startswith(("cmd:", "=== job", "[web]", "[comfy]", "[qwen]"))]
 
 
 def stage_key_from_log(text):
@@ -362,6 +376,7 @@ class Manager:
         self.root = root
         self.driver = os.path.abspath(driver)
         self.image_driver = os.path.join(os.path.dirname(self.driver), "zimage_runner.py")
+        self.qwen_driver = os.path.join(os.path.dirname(self.driver), "qwen_image_runner.py")
         self.password = password
         self.data = os.path.join(root, ".h3ref2v")
         self.jobs_dir = os.path.join(self.data, "jobs")
@@ -545,6 +560,7 @@ class Manager:
                         "gen": m.get("gen"), "prompt": m.get("prompt"),
                         "aspect": m.get("aspect"), "megapixels": m.get("megapixels"),
                         "steps": m.get("steps"),
+                        "model": m.get("model"),
                         "strength": m.get("strength"),
                         "init_material_id": m.get("init_material_id"),
                         "init_name": m.get("init_name"),
@@ -683,7 +699,7 @@ class Manager:
             mat = {"id": mid, "name": name, "kind": kind, "file": stored,
                    "size": len(content), "ts": NOW(), "gen": gen}
             for k in ("prompt", "aspect", "megapixels", "steps", "seed",
-                      "strength", "init_material_id", "init_name"):
+                      "strength", "init_material_id", "init_name", "model"):
                 if meta and meta.get(k) is not None:
                     mat[k] = meta[k]
             p.setdefault("materials", []).append(mat)
@@ -896,6 +912,8 @@ class Manager:
         for l in text.splitlines():
             if l.startswith("[comfy] "):
                 detail = l[len("[comfy] "):].strip()
+            elif l.startswith("[qwen] "):
+                detail = l[len("[qwen] "):].strip()
         if detail:
             job["st"]["detail"] = detail[:160]
         if key != "sampling":
@@ -919,7 +937,8 @@ class Manager:
         p = cfg["params"]
         mode = cfg.get("mode", "ref2v")
         if mode in IMAGE_MODES:
-            a = [sys.executable, self.image_driver, "--mode", mode, "--tag", cfg["tag"],
+            driver = self.qwen_driver if cfg.get("model") == "qwen" else self.image_driver
+            a = [sys.executable, driver, "--mode", mode, "--tag", cfg["tag"],
                  "--prompt", p["prompt"], "--aspect", p["aspect"],
                  "--megapixels", str(p["megapixels"]), "--steps", str(p["steps"]),
                  "--out", os.path.join(self._out_dir(mode, cfg.get("project")),
@@ -973,6 +992,10 @@ class Manager:
                 if job["st"].get("cancel_requested"):
                     self._set(jid, "status", "cancelled", ended=NOW(), err="取消(等待中)")
                     return
+            if mode in IMAGE_MODES and cfg.get("model") == "qwen":
+                log.write("[web] freeing ComfyUI VRAM for Qwen-Image-2.1\n"); log.flush()
+                if self.comfy.free_vram():
+                    self._wait_gpu_free(log)
             os.makedirs(self._out_dir(mode, cfg.get("project")), exist_ok=True)
             ext = "png" if mode in IMAGE_MODES else "mp4"
             out_path = os.path.join(self._out_dir(mode, cfg.get("project")), "%s.%s" % (cfg["tag"], ext))
@@ -1041,7 +1064,7 @@ class Manager:
         params = cfg["params"]
         meta = {"prompt": params.get("prompt"), "aspect": params.get("aspect"),
                 "megapixels": params.get("megapixels"), "steps": params.get("steps"),
-                "seed": cfg.get("seed")}
+                "seed": cfg.get("seed"), "model": cfg.get("model") or "zimage"}
         if mode == "i2i":
             meta["strength"] = params.get("strength")
             meta["init_material_id"] = cfg.get("init_material_id")
@@ -1058,6 +1081,24 @@ class Manager:
                   material_id=mat["id"], material_name=mat["name"])
         log.write("\n[web] done rc=0 material=%s image=%s size=%d\n"
                   % (mat["id"], rel, len(content)))
+
+    def _wait_gpu_free(self, log, min_free_mb=20000, timeout_s=90):
+        """Wait until both cards have enough free VRAM for Qwen-Image-2.1."""
+        t0 = time.time()
+        last = ""
+        while time.time() - t0 < timeout_s:
+            nv = _nvidia_vram()
+            if not nv:
+                return True
+            free = sorted((i, (t - u) // 1048576) for i, (t, u) in nv.items())
+            short = " ".join("gpu%d free=%dMB" % (i, f) for i, f in free)
+            if short != last:
+                log.write("[web] %s\n" % short); log.flush(); last = short
+            if all(f >= min_free_mb for _, f in free):
+                return True
+            time.sleep(3)
+        log.write("[web] VRAM wait timeout, proceeding\n"); log.flush()
+        return False
 
     def _term(self, job):
         child = job.get("child")
@@ -1875,6 +1916,7 @@ def make_handler(mgr):
             if project not in mgr.projects:
                 self._err(400, "项目不存在"); return
             mode = js.get("mode") if js.get("mode") in IMAGE_MODES else "t2i"
+            model = js.get("model") if js.get("model") in IMAGE_MODELS else "zimage"
             prompt = (js.get("prompt") or "").strip()
             if not prompt:
                 self._err(400, "请填写提示词"); return
@@ -1897,7 +1939,7 @@ def make_handler(mgr):
                 init_name = ent.get("name") or ent.get("file") or ""
                 media["init_image"] = path
             cfg = {
-                "mode": mode, "project": project,
+                "mode": mode, "project": project, "model": model,
                 "name": (js.get("name") or "").strip()[:60], "tag": None, "seed": seed,
                 "init_material_id": init_mid, "init_name": init_name,
                 "params": {
@@ -3314,7 +3356,6 @@ async function submitImage(){
   if(!imgName){ notice('请先创作图片并填写素材名'); return; }
   const mode=($('imgMode').value==='i2i')?'i2i':'t2i';
   const model=$('imgModel').value||'zimage';
-  if(model==='qwen'){ notice('Qwen-Image-2.1 尚未接入后端，请先选 Z-Image Turbo'); return; }
   const body={project:curProject, name:imgName, mode, model};
   if(mode==='i2i'){
     const init=$('imgI2ISrc').value;
