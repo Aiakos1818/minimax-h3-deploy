@@ -1677,6 +1677,7 @@ main{padding:14px;max-width:1400px;margin:0 auto}
 .card h2{font-size:14px;margin:0 0 10px;color:var(--mut);font-weight:600;letter-spacing:.03em}
 .cardhead{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}
 .cardhead h2{margin:0}
+.cardhead.modehead{justify-content:flex-start}
 .cardhead select{width:auto;padding:6px 10px;font-size:13px}
 label{display:block;font-size:13px;color:var(--mut);margin:10px 0 4px}
 textarea,input,select{width:100%;background:#0e1116;border:1px solid var(--line);color:var(--fg);
@@ -1697,9 +1698,10 @@ textarea{min-height:96px;resize:vertical}
 button.primary{width:100%;margin-top:14px;padding:12px;border:0;border-radius:9px;background:var(--acc);
        color:#fff;font-size:15px;font-weight:600;cursor:pointer}
 button.primary:disabled{opacity:.5;cursor:default}
-.submitrow{display:flex;gap:10px;margin-top:14px}
-.submitrow button{flex:1 1 0;margin:0;height:44px;display:flex;align-items:center;justify-content:center}
-.submitrow button.primary{width:auto;padding:0}
+.headacts{display:flex;gap:8px;align-items:center;flex:0 0 auto}
+.headacts button{width:auto;min-width:76px;height:34px;margin:0;padding:0 16px;border-radius:8px;
+        font-size:14px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.headacts button.primary{width:auto;padding:0 16px;font-size:14px}
 button.ghost{background:#20242d;color:var(--fg);border:1px solid var(--line);border-radius:8px;
        padding:6px 10px;font-size:13px;cursor:pointer}
 .progress{height:6px;background:#20242d;border-radius:3px;overflow:hidden;margin-top:8px;display:none}
@@ -1817,8 +1819,6 @@ details.sec>summary .editbtn{margin-left:auto}
   .formgrid textarea{min-height:214px}
   .params{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:4px}
   .params>.grid3,.params>.grid2{display:contents}
-  .refsize{max-width:320px}
-  .submitrow{max-width:420px}
   .statgrid{display:grid;gap:14px;grid-template-columns:minmax(0,1fr) minmax(0,1fr);
             grid-template-areas:"cur clips" "jobs clips"}
   .statgrid>.card{margin-bottom:0}
@@ -1882,13 +1882,20 @@ details.sec>summary .editbtn{margin-left:auto}
   <div id="projView" style="display:none">
     <div class="card" id="projHead"></div>
     <div class="card">
-      <div class="cardhead">
+      <div class="cardhead modehead">
         <h2>新建任务</h2>
         <select id="mode" onchange="onModeChange()">
           <option value="t2v">文生视频</option>
           <option value="ref2v">参考生视频</option>
         </select>
+        <span class="spacer"></span>
+        <span class="headacts">
+          <button class="primary" id="submitBtn" onclick="submit()">提交</button>
+          <button class="ghost" onclick="resetForm()">重置</button>
+        </span>
       </div>
+      <div class="progress" id="prog"><i></i></div>
+      <div class="muted" id="submitMsg" style="margin-top:8px"></div>
       <div class="formgrid">
         <div class="fcol">
           <label id="promptLabel"></label>
@@ -1943,15 +1950,9 @@ details.sec>summary .editbtn{margin-left:auto}
               <option value="0.6">0.6</option><option value="0.8">0.8</option>
             </select></div>
         </div>
+        <div id="refImageSizeRow" class="refsize"><label>参考图缩放</label>
+          <select id="ref_image_size"><option value="match">match(快)</option><option value="max">max(保真)</option></select></div>
       </div>
-      <div id="refImageSizeRow" class="refsize"><label>参考图缩放</label>
-        <select id="ref_image_size"><option value="match">match(快)</option><option value="max">max(保真)</option></select></div>
-      <div class="submitrow">
-        <button class="primary" id="submitBtn" onclick="submit()">提交</button>
-        <button class="ghost" onclick="resetForm()">重置</button>
-      </div>
-      <div class="progress" id="prog"><i></i></div>
-      <div class="muted" id="submitMsg" style="margin-top:8px"></div>
     </div>
     <div class="card" id="matCard">
       <div class="cardhead"><h2>素材库</h2><span class="muted" id="matSub"></span></div>
