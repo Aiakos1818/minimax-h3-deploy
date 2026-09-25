@@ -2086,14 +2086,6 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
       </div>
     </div>
     <div class="statgrid">
-      <div class="card" id="stCur">
-        <h2>当前分镜</h2>
-        <div id="cur"><div class="muted">空闲</div></div>
-        <details class="logBox" id="logBox" style="margin-top:12px">
-          <summary class="muted">诊断日志</summary>
-          <pre class="log" id="log"></pre>
-        </details>
-      </div>
       <div class="card" id="matCard">
         <div class="cardhead"><h2>素材库</h2><span class="muted" id="matSub"></span></div>
         <div class="matup">
@@ -2108,6 +2100,10 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
         <details class="sec" open>
           <summary>分镜记录</summary>
           <div id="jobs" class="muted">暂无</div>
+        </details>
+        <details class="logBox" id="logBox" style="margin-top:12px">
+          <summary class="muted">诊断日志</summary>
+          <pre class="log" id="log"></pre>
         </details>
         <span class="cardacts"><button class="ghost" onclick="openEdit()">剪辑</button></span>
       </div>
@@ -2260,7 +2256,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 const $ = (id)=>document.getElementById(id);
 const esc = (s)=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ASPECTS = __ASPECTS__;
-let logOffset = 0, lastJob = null, jobsById = {}, curStart = 0, curRunning = false;
+let logOffset = 0, lastJob = null, jobsById = {};
 let shotName = null, shotCb = null;
 let projects = [], projNames = {}, curProject = null, projectsLoaded = false;
 let clipsCache = [];
@@ -2586,30 +2582,6 @@ function friendlyStatus(j){
   return STATUS_CN[j.status]||j.status;
 }
 function fmtDur(sec){ sec=Math.max(0,Math.floor(sec)); return String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0'); }
-function renderCurrent(j){
-  curStart = j.created_ts || curStart || 0;
-  curRunning = (j.status==='running'||j.status==='queued');
-  const sig=[j.id,j.name||'',j.status,friendlyStatus(j),j.mode||'',j.project||'',j.clip_rel||'',j.err||'',j.detail||'',mediaBrief(j.media)].join('|');
-  if($('cur')._sig===sig) return;
-  $('cur')._sig=sig;
-  const p=j.params||{};
-  const meta=[projName(j.project), MODE_CN[j.mode]||'', mediaBrief(j.media), p.dur?p.dur+'s':'', p.aspect?p.aspect.split(' ')[0]:'',
-              p.megapixels?p.megapixels+'MP':'', p.steps?p.steps+'步':'', j.seed?('seed '+j.seed):''].filter(Boolean).join(' · ');
-  let bar='';
-  if(j.status==='running' && j.progress && j.progress.total){
-    bar='<div class="bar"><i style="width:'+Math.round(j.progress.cur/j.progress.total*100)+'%"></i></div>';
-  }else if(j.status==='running'||j.status==='queued'){
-    bar='<div class="bar indet"><i></i></div>';
-  }
-  const cls=(j.status==='failed')?' style="color:var(--err)"':'';
-  const detail=(curRunning&&j.detail)? '<span class="muted">'+esc(j.detail)+'</span>' : '';
-  $('cur').innerHTML='<div class="curState"'+cls+'>'+friendlyStatus(j)+'</div>'+bar+
-    '<div class="curMeta"><b>'+esc(j.name||j.id)+'</b>'+(j.name?' <span class="muted">'+j.id+'</span>':'')+
-    (meta?'<br>'+meta:'')+(detail?'<br>'+detail:'')+
-    (curRunning&&curStart?'<br>已用时 <span id="curElapsed">'+fmtDur(Date.now()/1000-curStart)+'</span>':'')+
-    (j.status==='done'&&j.clip_rel?'<br><button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看产物</button>':'')+'</div>';
-}
-setInterval(()=>{ const el=$('curElapsed'); if(el&&curRunning&&curStart) el.textContent=fmtDur(Date.now()/1000-curStart); },1000);
 
 for (const a of ASPECTS){ const o=document.createElement('option'); o.value=a; o.textContent=a; $('aspect').appendChild(o); }
 $('aspect').value = ASPECTS[0];
@@ -2954,14 +2926,9 @@ async function refreshState(){
   if(j && (j.project!==curProject || j.mode==='edit')) j=null;
   if(j){
     if(lastJob!==j.id){ lastJob=j.id; logOffset=0; $('log').textContent=''; }
-    renderCurrent(j);
   }else{
-    lastJob=null; renderCurrentEmpty();
+    lastJob=null;
   }
-}
-function renderCurrentEmpty(){
-  if($('cur')._sig==='EMPTY') return;
-  $('cur')._sig='EMPTY'; $('cur').innerHTML='<div class="muted">空闲</div>';
 }
 
 async function pollLog(){
