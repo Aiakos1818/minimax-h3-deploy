@@ -1953,6 +1953,8 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
         background-size:200% 100%;animation:phshim 1.4s linear infinite}
 .jthumb.ph>i{position:absolute;left:0;bottom:0;height:3px;background:var(--acc);transition:width .3s}
 .jthumb.ph.static{animation:none;background:#0e1116}
+.jthumbwrap{position:relative;flex:0 0 auto;line-height:0}
+.jthumbwrap>.thumbdl{position:absolute;inset:0;cursor:pointer}
 @keyframes phshim{0%{background-position:100% 0}100%{background-position:-100% 0}}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;align-items:center;justify-content:center;z-index:20;padding:12px}
 #viewModal{z-index:30}
@@ -1979,6 +1981,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .projcard .meta2{font-size:12px;color:var(--mut)}
 .bcbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .projsub{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.matcardhead{font-size:14px;color:var(--mut);font-weight:600;margin-bottom:10px}
 .matup{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .matup #matName{flex:1 1 240px;min-width:0}
 .matup #matFile{flex:1 1 260px;min-width:0;padding:7px 10px;font-size:13px}
@@ -1986,6 +1989,9 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .matgroups{display:flex;flex-direction:column;gap:16px;margin-top:12px}
 .matgrouphead{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;color:var(--mut);font-weight:600;margin-bottom:8px}
 .matgrouphead .ghost{padding:3px 10px;font-size:12.5px}
+details.matgroup>summary.matgrouphead{display:flex;list-style:none;margin-bottom:0}
+details.matgroup>summary.matgrouphead::-webkit-details-marker{display:none}
+details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
 #imgStatus:empty{display:none}
 .matgroups .matgrid{margin-top:0}
 .matcard{background:#0e1116;border:1px solid var(--line);border-radius:10px;overflow:hidden;
@@ -2228,16 +2234,14 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
     </div>
     <div class="statgrid">
       <div class="card" id="matCard">
-        <details class="sec">
-          <summary onclick="toggleSec(event)"><span class="setoggle">素材库 <span class="muted" id="matSub"></span></span></summary>
-          <div class="matup">
-            <input id="matName" placeholder="素材名称（项目内唯一）" onkeydown="if(event.key==='Enter'){event.preventDefault();uploadMaterial()}">
-            <input id="matFile" type="file" accept="image/*,video/*,audio/*" onchange="onMatFileChange()">
-            <button type="button" class="ghost" onclick="uploadMaterial()">上传素材</button>
-          </div>
-          <div class="muted" id="matMsg" style="margin-top:6px"></div>
-          <div id="matGrid" class="matgroups"></div>
-        </details>
+        <div class="matcardhead">素材库 <span class="muted" id="matSub"></span></div>
+        <div class="matup">
+          <input id="matName" placeholder="素材名称（项目内唯一）" onkeydown="if(event.key==='Enter'){event.preventDefault();uploadMaterial()}">
+          <input id="matFile" type="file" accept="image/*,video/*,audio/*" onchange="onMatFileChange()">
+          <button type="button" class="ghost" onclick="uploadMaterial()">上传素材</button>
+        </div>
+        <div class="muted" id="matMsg" style="margin-top:6px"></div>
+        <div id="matGrid" class="matgroups"></div>
       </div>
       <div class="card" id="stJobs">
         <details class="sec" open>
@@ -2491,7 +2495,6 @@ function route(){
       $('jobs')._sig=null; $('jobs').innerHTML='';
       jobsById={}; clipsCache=[]; lastJob=null; logOffset=0; $('log').textContent='';
       clearSelMat(); materials=[]; $('matGrid')._sig=null; $('matGrid').innerHTML='';
-      $('matCard').querySelector('details').open=false;
       $('stJobs').querySelector('details').open=true;
       $('imgCard').style.display='none'; $('matCard').style.display=''; $('stJobs').style.display='';
       $('imgTaskCard').style.display='none'; $('imgStatus').textContent=''; imgName=null; imgJobId=null;
@@ -2905,13 +2908,14 @@ function renderMaterials(){
     box._sig=sig; box.innerHTML='';
     [['image','图片'],['video','视频'],['audio','音频']].forEach(([kind,label])=>{
       const list=materials.filter(m=>m.kind===kind);
-      const sec=document.createElement('div'); sec.className='matgroup';
-      const hd=document.createElement('div'); hd.className='matgrouphead';
+      const sec=document.createElement('details'); sec.className='matgroup';
+      const hd=document.createElement('summary'); hd.className='matgrouphead';
+      hd.setAttribute('onclick','toggleSec(event)');
       if(kind==='image'){
-        hd.innerHTML='<span>'+label+' ('+list.length+')</span>'+
-          '<button class="ghost" onclick="openImageCreator()">创作图片素材</button>';
+        hd.innerHTML='<span class="setoggle">'+label+' ('+list.length+')</span>'+
+          '<button class="ghost" onclick="event.preventDefault();event.stopPropagation();openImageCreator()">创作图片素材</button>';
       }else{
-        hd.textContent=label+' ('+list.length+')';
+        hd.innerHTML='<span class="setoggle">'+label+' ('+list.length+')</span>';
       }
       sec.appendChild(hd);
       if(!list.length){ box.appendChild(sec); return; }
@@ -3024,12 +3028,14 @@ function renderImageList(){
     const nm=matSaveName(m), gen=GEN_CN[m.gen]||m.gen||'生成';
     const st=m.exists? '<span class="st done">已完成</span>' : '<span class="st failed">文件缺失</span>';
     const d=document.createElement('div'); d.className='job';
-    d.innerHTML='<img class="jthumb" loading="lazy" title="'+esc(nm)+'" src="'+thumbUrl(pid,m.file,m.thumb_v,nm)+'">'+
+    d.innerHTML='<span class="jthumbwrap"><img class="jthumb" loading="lazy" title="'+esc(nm)+'" src="'+thumbUrl(pid,m.file,m.thumb_v,nm)+'">'+
+      '<a class="thumbdl" href="'+esc(matUrl(pid,m.file,nm))+'" download="'+esc(nm)+
+      '" title="双击查看大图（右键另存为原图）" onclick="event.preventDefault()"></a></span>'+
       '<span class="meta"><b>'+esc(m.name)+'</b><br><b>'+esc(m.id)+'</b><br>'+
         esc(gen)+' · '+fmtSize(m.size)+'<br>'+esc(m.ts||'')+'<br>'+st+'</span>'+
       '<span class="jobsacts"><button class="ghost">详情</button> <button class="ghost">删除</button> '+
         '<button class="ghost">查看</button> <button class="ghost">复用</button></span>';
-    const im=d.querySelector('img.jthumb'); if(im) im.onclick=()=>viewMaterial(m.id);
+    const ov=d.querySelector('.thumbdl'); if(ov) ov.addEventListener('click',()=>viewMaterial(m.id));
     const btns=d.querySelectorAll('.jobsacts button');
     btns[0].onclick=()=>detailMaterial(m.id);
     btns[1].onclick=()=>deleteMaterial(m.id);
