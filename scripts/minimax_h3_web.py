@@ -2204,7 +2204,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
         <div class="fcol">
           <div class="prompthead">
             <label id="promptLabel"></label>
-            <button class="ghost" id="optBtn" onclick="optimizePrompt()">优化</button>
+            <button class="ghost" id="optBtn" onclick="optimizePrompt('prompt', this)">优化</button>
           </div>
           <textarea id="prompt"></textarea>
         </div>
@@ -2292,7 +2292,8 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
             </div>
           </div>
           <div class="fcol">
-            <label>提示词</label>
+            <div class="prompthead"><label>提示词</label>
+              <button class="ghost" onclick="optimizePrompt('imgPrompt', this)">优化</button></div>
             <textarea id="imgPrompt"></textarea>
           </div>
         </div>
@@ -2323,7 +2324,8 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
             </div>
           </div>
           <div class="fcol">
-            <label>提示词</label>
+            <div class="prompthead"><label>提示词</label>
+              <button class="ghost" onclick="optimizePrompt('imgI2IPrompt', this)">优化</button></div>
             <textarea id="imgI2IPrompt"></textarea>
           </div>
         </div>
@@ -3989,15 +3991,20 @@ async function releaseVram(){
   if(!ok) return;
   fetch('/api/service/stop',{method:'POST'}).then(async r=>{ const j=await r.json(); notice(j.msg||'ok'); refreshState(); }); }
 
-async function optimizePrompt(){
-  const prompt=$('prompt').value.trim();
+let optTarget='prompt';
+async function optimizePrompt(target,btn){
+  const ta=$(target||'prompt');
+  if(!ta) return;
+  const prompt=(ta.value||'').trim();
   if(!prompt){ notice('请先填写提示词'); return; }
-  const counts = $('mode').value==='ref2v'
+  optTarget=ta.id;
+  const counts = (ta.id==='prompt' && $('mode').value==='ref2v')
     ? {ref_image:selMat.ref_image.length,
        ref_video:selMat.ref_video.length+selClip.ref_video.length,
        ref_audio:selMat.ref_audio.length}
     : {};
-  $('optText').value=''; $('optMsg').textContent='优化中…'; $('optBtn').disabled=true;
+  $('optText').value=''; $('optMsg').textContent='优化中…';
+  if(btn) btn.disabled=true;
   $('optModal').classList.add('open');
   try{
     const r=await fetch('/api/optimize',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -4006,7 +4013,7 @@ async function optimizePrompt(){
     if(r.ok && j.ok){ $('optText').value=j.text; $('optMsg').textContent='优化完成'; }
     else $('optMsg').textContent='优化失败: '+(j.error||r.status);
   }catch(e){ $('optMsg').textContent='网络错误'; }
-  $('optBtn').disabled=false;
+  if(btn) btn.disabled=false;
 }
 function closeOpt(){ $('optModal').classList.remove('open'); }
 function copyOpt(){
@@ -4022,7 +4029,7 @@ function fallbackCopy(){
   catch(e){ $('optMsg').textContent='复制失败，请手动选择文本'; }
   ta.setAttribute('readonly','');
 }
-function applyOpt(){ const t=$('optText').value; if(!t) return; $('prompt').value=t; closeOpt(); }
+function applyOpt(){ const t=$('optText').value; if(!t) return; $(optTarget).value=t; closeOpt(); }
 
 onModeChange();
 (async()=>{ await refreshProjects(); route(); })();
