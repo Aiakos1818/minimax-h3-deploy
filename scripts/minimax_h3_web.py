@@ -436,7 +436,7 @@ class Manager:
             busy = [j["id"] for j in jobs
                     if j["st"].get("status") in ("running", "queued")]
             if busy:
-                return False, "项目内仍有运行/排队中的任务，请先取消"
+                return False, "项目内仍有运行/排队中的分镜，请先取消"
             if mode == "purge":
                 for j in jobs:
                     rel = j["st"].get("clip_rel")
@@ -459,7 +459,7 @@ class Manager:
                     self.persist_status(j)
             shutil.rmtree(self._proj_dir(pid), ignore_errors=True)
             del self.projects[pid]
-        return True, ("已删除项目及其任务与产物" if mode == "purge" else "已删除项目，任务已转默认项目")
+        return True, ("已删除项目及其分镜与产物" if mode == "purge" else "已删除项目，分镜已转默认项目")
 
     def _project_from_rel(self, rel):
         parts = rel.split("/")
@@ -661,6 +661,7 @@ class Manager:
                           "created_ts": time.time(), "tag": jid, "stage": None,
                           "mode": cfg.get("mode", "ref2v"),
                           "project": cfg.get("project", DEFAULT_PROJECT),
+                          "name": cfg.get("name") or None,
                           "params": cfg["params"], "seed": cfg["seed"],
                           "media": cfg["media"]},
                    "child": None}
@@ -850,7 +851,7 @@ class Manager:
         with self.lock:
             job = self.jobs.get(jid)
             if not job or job["st"].get("status") not in ("queued", "running"):
-                return False, "任务不存在或已结束"
+                return False, "分镜不存在或已结束"
             if job["st"]["status"] == "queued":
                 job["st"].update(status="cancelled", ended=NOW(),
                                  duration=int(time.time() - job["st"].get("created_ts", time.time())))
@@ -868,7 +869,7 @@ class Manager:
                 return False, "不存在"
             st = job["st"].get("status")
             if st == "running":
-                return False, "运行中的任务请先取消"
+                return False, "运行中的分镜请先取消"
             if st == "queued":
                 self.queue = [x for x in self.queue if x != jid]
                 job["st"].update(status="cancelled", ended=NOW())
@@ -883,6 +884,7 @@ class Manager:
                 "created_ts": st.get("created_ts"),
                 "project": st.get("project") or (job.get("cfg") or {}).get("project") or DEFAULT_PROJECT,
                 "mode": st.get("mode") or (job.get("cfg") or {}).get("mode") or "ref2v",
+                "name": st.get("name") or (job.get("cfg") or {}).get("name") or None,
                 "ended": st.get("ended"), "duration": st.get("duration"),
                 "stage": st.get("stage"), "progress": st.get("progress"),
                 "detail": st.get("detail"),
@@ -909,6 +911,19 @@ class Manager:
                    or (j.get("cfg") or {}).get("project") == project]
         lst.sort(key=lambda x: x.get("created") or "", reverse=True)
         return lst
+
+    def name_taken(self, project, name, keep=None):
+        if not name:
+            return False
+        with self.lock:
+            for jid, j in self.jobs.items():
+                if jid == keep or j["st"].get("mode") == "edit":
+                    continue
+                if (j["st"].get("project") or (j.get("cfg") or {}).get("project")) != project:
+                    continue
+                if (j["st"].get("name") or (j.get("cfg") or {}).get("name") or "") == name:
+                    return True
+        return False
 
     def delete_outputs(self, rels):
         base = os.path.realpath(self.out_root)
@@ -1037,7 +1052,7 @@ class Manager:
             if mode != "edit":
                 return False, "不是剪辑成片"
             if job["st"].get("status") in ("running", "queued"):
-                return False, "运行中的任务请先取消"
+                return False, "运行中的分镜请先取消"
             rel = job["st"].get("clip_rel")
             if rel:
                 base = os.path.realpath(self.out_root)
@@ -1489,7 +1504,7 @@ def make_handler(mgr):
                 self._json(201, mgr.project_info(p["id"])); return
             if u.path == "/api/service/stop":
                 if mgr.current:
-                    self._json(409, {"ok": False, "msg": "有任务在跑, 先取消"}); return
+                    self._json(409, {"ok": False, "msg": "有分镜在跑, 先取消"}); return
                 subprocess.run(["bash", os.path.expanduser("~/ComfyUI-Deploy/stop.sh")], check=False)
                 self._json(200, {"ok": True, "msg": "已停止 ComfyUI, 显存已释放"}); return
             if u.path == "/api/output/delete":
@@ -1586,6 +1601,9 @@ def make_handler(mgr):
             project = _first(fields, "project", DEFAULT_PROJECT) or DEFAULT_PROJECT
             if project not in mgr.projects:
                 self._err(400, "项目不存在"); return
+            name = (_first(fields, "name", "") or "").strip()[:60]
+            if name and mgr.name_taken(project, name):
+                self._err(409, "已存在同名分镜：%s" % name); return
             ids = {k: [x for x in (fields.get(k) or []) if x] for k in MEDIA_KINDS}
             frame_ids = {k: (_first(fields, k) or None) for k in FRAME_KINDS}
             n = {k: len(v) for k, v in ids.items()}
@@ -1632,6 +1650,7 @@ def make_handler(mgr):
             cfg = {
                 "mode": mode,
                 "project": project,
+                "name": name,
                 "tag": None,  # filled with the job id
                 "seed": seed,
                 "params": {
@@ -1768,6 +1787,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .projcard .nm{font-weight:600;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .projcard .meta2{font-size:12px;color:var(--mut)}
 .bcbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.projsub{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .mediagrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:6px}
 .mediagrid img,.mediagrid video{width:100%;aspect-ratio:16/9;object-fit:cover;background:#000;
        border-radius:8px;border:1px solid var(--line)}
@@ -1911,9 +1931,9 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   </div>
   <div id="projView" style="display:none">
     <div class="card" id="projHead"></div>
-    <div class="card" id="taskCard">
+    <div class="card" id="taskCard" style="display:none">
       <div class="cardhead modehead">
-        <h2>新建任务</h2>
+        <h2>新建分镜</h2>
         <select id="mode" onchange="onModeChange()">
           <option value="t2v">文生视频</option>
           <option value="ref2v">参考生视频</option>
@@ -1995,7 +2015,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
     </div>
     <div class="statgrid">
       <div class="card" id="stCur">
-        <h2>当前任务</h2>
+        <h2>当前分镜</h2>
         <div id="cur"><div class="muted">空闲</div></div>
         <details class="logBox" id="logBox" style="margin-top:12px">
           <summary class="muted">诊断日志</summary>
@@ -2004,7 +2024,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
       </div>
       <div class="card" id="stJobs">
         <details class="sec" open>
-          <summary>任务记录</summary>
+          <summary>分镜记录</summary>
           <div id="jobs" class="muted">暂无</div>
         </details>
       </div>
@@ -2134,9 +2154,20 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
     </div>
   </div>
 </div>
+<div class="modal" id="shotModal" onclick="if(event.target===this)closeShotModal()">
+  <div class="box" style="width:min(420px,96vw)">
+    <div class="optrow"><b id="shotTitle">添加分镜</b><button class="ghost" onclick="closeShotModal()">关闭</button></div>
+    <input id="shotVal" placeholder="分镜名（项目内唯一）" onkeydown="if(event.key==='Enter'){event.preventDefault();confirmShot()}">
+    <div class="muted" id="shotMsg" style="margin-top:8px;min-height:1.2em;color:var(--err)"></div>
+    <div class="optacts">
+      <button class="ghost" onclick="closeShotModal()">取消</button>
+      <button class="primary" id="shotOk" onclick="confirmShot()">确定</button>
+    </div>
+  </div>
+</div>
 <div class="modal" id="jobModal" onclick="if(event.target===this)closeJob()">
   <div class="box" style="width:min(720px,96vw);max-height:88vh;overflow:auto">
-    <div class="optrow"><b id="jTitle">任务详情</b><button class="ghost" onclick="closeJob()">关闭</button></div>
+    <div class="optrow"><b id="jTitle">分镜详情</b><button class="ghost" onclick="closeJob()">关闭</button></div>
     <div id="jBody"></div>
   </div>
 </div>
@@ -2159,6 +2190,7 @@ const $ = (id)=>document.getElementById(id);
 const esc = (s)=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ASPECTS = __ASPECTS__;
 let logOffset = 0, lastJob = null, jobsById = {}, curStart = 0, curRunning = false;
+let shotName = null, shotCb = null;
 let projects = [], projNames = {}, curProject = null, projectsLoaded = false;
 let clipEdit = false, clipSel = new Set(), clipsCache = [];
 let editSeq={aspect:'0',fade_in:0,fade_out:0,clips:[]}, editAvail=[], editLast=null, editLogOff=0;
@@ -2181,7 +2213,7 @@ const EDIT_ASPECTS = [['0','原始画幅'],['2.39','2.39:1 宽银幕'],['16:9','
   ['9:16','9:16 竖屏'],['1:1','1:1 方形'],['4:3','4:3 横版'],['3:4','3:4 竖版']];
 function projName(pid){ return projNames[pid] || (pid==='default'?'默认项目':(pid||'')); }
 function projSub(p){
-  return [p.counts.total+' 个任务',
+  return [p.counts.total+' 个分镜',
           p.counts.running?p.counts.running+' 进行中':null,
           p.counts.queued?p.counts.queued+' 排队':null].filter(Boolean).join(' · ');
 }
@@ -2216,7 +2248,8 @@ function renderProjHead(){
       (canEdit?'<button class="ghost" onclick="renameProject()">改名</button>'+
       '<button class="ghost" onclick="deleteProject()">删除</button>':'')+
       '<button class="ghost" onclick="goHome()">全部项目</button></span></div>'+
-    '<div class="muted">'+projSub(p)+'</div>';
+    '<div class="projsub"><span class="muted">'+esc(projSub(p))+'</span>'+
+      '<button class="ghost" onclick="addShot()">添加分镜</button></div>';
 }
 function openProject(pid){ location.hash='#/p/'+encodeURIComponent(pid); }
 function openEdit(){ if(curProject) location.hash='#/p/'+encodeURIComponent(curProject)+'/edit'; }
@@ -2238,7 +2271,8 @@ function route(){
     $('editView').style.display=edit?'':'none';
     renderProjHead();
     refreshMaterials();
-    if(edit){ refreshEdit(); } else { refreshJobs(); refreshOutputs(); }
+    if(edit){ refreshEdit(); }
+    else { $('taskCard').style.display='none'; shotName=null; refreshJobs(); refreshOutputs(); }
   }else{
     curProject=null;
     $('homeView').style.display=''; $('projView').style.display='none'; $('editView').style.display='none';
@@ -2268,8 +2302,8 @@ async function renameProject(){
 let delPid=null;
 function updDelHint(){
   $('delHint').textContent = $('delClips').checked
-    ? '将同时删除该项目下的任务记录与视频文件，不可恢复。'
-    : '不删除产物：项目内任务将转为「默认项目」，视频文件保留。';
+    ? '将同时删除该项目下的分镜记录与视频文件，不可恢复。'
+    : '不删除产物：项目内分镜将转为「默认项目」，视频文件保留。';
 }
 function deleteProject(){
   const p=projects.find(x=>x.id===curProject); if(!p) return;
@@ -2321,6 +2355,36 @@ function askInput(title,value,okText,ph){
   });
 }
 function inputResolve(v){ $('inputModal').classList.remove('open'); const cb=inputCb; inputCb=null; if(cb) cb(v); }
+function openShotModal(title,value,okText,cb){
+  shotCb=cb;
+  $('shotTitle').textContent=title||'添加分镜';
+  $('shotOk').textContent=okText||'确定';
+  $('shotVal').value=value||'';
+  $('shotMsg').textContent='';
+  $('shotModal').classList.add('open');
+  setTimeout(()=>{ $('shotVal').focus(); $('shotVal').select(); },50);
+}
+function closeShotModal(){ $('shotModal').classList.remove('open'); shotCb=null; }
+async function confirmShot(){
+  if(!curProject) return;
+  const name=$('shotVal').value.trim();
+  if(!name){ $('shotMsg').textContent='请填写分镜名'; return; }
+  if(name.length>60){ $('shotMsg').textContent='分镜名过长（>60 字符）'; return; }
+  const r=await api('/api/jobs?project='+encodeURIComponent(curProject));
+  const used=((r&&r.jobs)||[]).some(j=>j.mode!=='edit' && (j.name||'')===name);
+  if(used){ $('shotMsg').textContent='已存在同名分镜，请换一个名字'; return; }
+  const cb=shotCb; shotCb=null; $('shotModal').classList.remove('open');
+  if(cb) cb(name);
+}
+function addShot(){
+  if(!curProject){ notice('请先进入一个项目'); return; }
+  openShotModal('添加分镜','','确定',(name)=>{ shotName=name; showTaskCard(); });
+}
+function showTaskCard(){
+  $('taskCard').style.display='';
+  $('submitMsg').textContent=shotName? ('分镜：'+shotName) : '';
+  setTimeout(()=>{ $('taskCard').scrollIntoView({block:'start',behavior:'smooth'}); },30);
+}
 function matUrl(pid,file){ return '/material/'+encodeURIComponent(pid)+'/'+encodeURIComponent(String(file).split('/').pop()); }
 function mediaUrl(jid,pid,p){
   p=String(p);
@@ -2356,9 +2420,10 @@ function bindSinglePlay(root){
 function showJob(id){
   const j=jobsById[id]; if(!j) return;
   const p=j.params||{}, m=j.media||{};
-  $('jTitle').textContent='任务详情 · '+id;
+  $('jTitle').textContent='分镜详情 · '+(j.name? j.name+' · ':'')+id;
   const row=(k,v)=>'<div class="detrow"><span class="muted">'+k+'</span><span>'+v+'</span></div>';
   let h='';
+  if(j.name) h+=row('分镜名', esc(j.name));
   h+=row('类型', MODE_CN[j.mode]||j.mode||'-');
   h+=row('时长', p.dur!=null? p.dur+' 秒':'-');
   h+=row('步数', p.steps!=null? p.steps:'-');
@@ -2376,11 +2441,16 @@ function closeJob(){
   $('jBody').querySelectorAll('video,audio').forEach(o=>o.pause());
   $('jobModal').classList.remove('open');
 }
-async function reuseJob(id){
+function reuseJob(id){
   const j=jobsById[id]; if(!j) return;
   if(!curProject){ notice('请先进入一个项目'); return; }
+  openShotModal('复用分镜', j.name||'', '确定', (name)=>{ doReuse(id,name); });
+}
+async function doReuse(id,name){
+  const j=jobsById[id]; if(!j) return;
   const p=j.params||{}, m=j.media||{};
-  $('submitMsg').textContent='正在载入任务 '+id+' 的素材…';
+  shotName=name;
+  $('submitMsg').textContent='正在载入分镜 '+id+' 的素材…';
   $('mode').value=(j.mode==='ref2v')?'ref2v':'t2v'; onModeChange();
   $('prompt').value=p.prompt||'';
   if(p.dur!=null) $('dur').value=p.dur;
@@ -2409,8 +2479,8 @@ async function reuseJob(id){
     const fn=String(p).split('/').pop();
     return !materials.some(x=>x.file===fn) && !clipsCache.some(x=>x.name===fn);
   }));
-  window.scrollTo({top:0,behavior:'smooth'});
-  $('submitMsg').textContent='已复用任务 '+id+(lost?'（部分素材已不在素材库/产物中，已跳过）':'（未提交）');
+  showTaskCard();
+  $('submitMsg').textContent='已复用分镜 '+(name||id)+(lost?'（部分素材已不在素材库/产物中，已跳过）':'（未提交）');
 }
 function friendlyErr(e){
   if(!e) return '';
@@ -2448,7 +2518,7 @@ function fmtDur(sec){ sec=Math.max(0,Math.floor(sec)); return String(Math.floor(
 function renderCurrent(j){
   curStart = j.created_ts || curStart || 0;
   curRunning = (j.status==='running'||j.status==='queued');
-  const sig=[j.id,j.status,friendlyStatus(j),j.mode||'',j.project||'',j.clip_rel||'',j.err||'',j.detail||'',mediaBrief(j.media)].join('|');
+  const sig=[j.id,j.name||'',j.status,friendlyStatus(j),j.mode||'',j.project||'',j.clip_rel||'',j.err||'',j.detail||'',mediaBrief(j.media)].join('|');
   if($('cur')._sig===sig) return;
   $('cur')._sig=sig;
   const p=j.params||{};
@@ -2463,7 +2533,8 @@ function renderCurrent(j){
   const cls=(j.status==='failed')?' style="color:var(--err)"':'';
   const detail=(curRunning&&j.detail)? '<span class="muted">'+esc(j.detail)+'</span>' : '';
   $('cur').innerHTML='<div class="curState"'+cls+'>'+friendlyStatus(j)+'</div>'+bar+
-    '<div class="curMeta"><b>'+j.id+'</b>'+(meta?'<br>'+meta:'')+(detail?'<br>'+detail:'')+
+    '<div class="curMeta"><b>'+esc(j.name||j.id)+'</b>'+(j.name?' <span class="muted">'+j.id+'</span>':'')+
+    (meta?'<br>'+meta:'')+(detail?'<br>'+detail:'')+
     (curRunning&&curStart?'<br>已用时 <span id="curElapsed">'+fmtDur(Date.now()/1000-curStart)+'</span>':'')+
     (j.status==='done'&&j.clip_rel?'<br><button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看产物</button>':'')+'</div>';
 }
@@ -2622,7 +2693,7 @@ async function renameMaterial(mid){
 }
 async function deleteMaterial(mid){
   const m=matById(mid); if(!m) return;
-  const ok=await askConfirm('删除素材「<b>'+esc(m.name)+'</b>」？正在使用它的排队/运行任务可能会失败。','删除素材','删除');
+  const ok=await askConfirm('删除素材「<b>'+esc(m.name)+'</b>」？正在使用它的排队/运行分镜可能会失败。','删除素材','删除');
   if(!ok) return;
   const r=await fetch('/api/materials/'+encodeURIComponent(curProject)+'/'+encodeURIComponent(mid)+'/delete',
     {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
@@ -2734,14 +2805,16 @@ async function submit(){
     media=[ff?'首帧':null, lf?'尾帧':null].filter(Boolean).join(' + ');
   }
   const ok=await askConfirm(
-    '项目：'+esc(projName(curProject))+'<br>类型：'+(MODE_CN[mode]||mode)+
+    '项目：'+esc(projName(curProject))+(shotName?'<br>分镜：'+esc(shotName):'')+
+    '<br>类型：'+(MODE_CN[mode]||mode)+
     '<br>时长：'+dur+'s · 步数：'+steps+(media?'<br>素材：'+media:'')+
     '<br>提示词：'+esc(prompt.slice(0,100))+(prompt.length>100?'…':''),
-    '提交任务','提交');
+    '提交分镜','提交');
   if(!ok) return;
   const fd=new FormData();
   fd.append('project', curProject);
   fd.append('mode', mode);
+  if(shotName) fd.append('name', shotName);
   fd.append('prompt', prompt);
   fd.append('dur', $('dur').value); fd.append('steps', $('steps').value);
   fd.append('aspect', $('aspect').value); fd.append('megapixels', $('megapixels').value);
@@ -2763,7 +2836,8 @@ async function submit(){
   xhr.onload=()=>{
     $('submitBtn').disabled=false;
     try{ const r=JSON.parse(xhr.responseText);
-      if(xhr.status===202){ $('submitMsg').textContent='已提交: '+r.id; $('prompt').value=''; }
+      if(xhr.status===202){ $('submitMsg').textContent='已提交: '+r.id; $('prompt').value='';
+        shotName=null; $('taskCard').style.display='none'; }
       else notice('提交失败: '+(r.error||xhr.status));
     }catch(e){ notice('提交失败: '+xhr.status); }
     setTimeout(()=>{ $('prog').style.display='none'; },600);
@@ -2796,7 +2870,7 @@ async function refreshState(){
   $('pQ').textContent='队列 '+((s.queue||[]).length+(s.current?1:0));
   if(!curProject) return;
   let j=s.current;
-  if(j && (j.project!==curProject || j.mode==='edit')) j=null;   // 只显示本项目的生成任务
+  if(j && (j.project!==curProject || j.mode==='edit')) j=null;   // 只显示本项目的生成分镜
   if(!j) j=(lastJob && jobsById[lastJob]) || null;
   if(j && (j.project!==curProject || j.mode==='edit')) j=null;
   if(j){
@@ -2832,7 +2906,7 @@ async function refreshJobs(){
   const r=await api('/api/jobs?project='+encodeURIComponent(curProject)); if(!r) return;
   const box=$('jobs');
   const jobs=r.jobs.filter(j=>j.mode!=='edit').slice(0,50);
-  const sig=jobs.map(j=>[j.id,j.status,(j.stage&&j.stage.label)||'',
+  const sig=jobs.map(j=>[j.id,j.name||'',j.status,(j.stage&&j.stage.label)||'',
     (j.progress&&j.progress.cur)||'',(j.progress&&j.progress.total)||'',
     j.duration!=null?j.duration:'',j.clip_rel||'',j.err||'',j.mode||''].join(',')).join('\n');
   if(box._sig===sig){ updateUsedElapsed(); return; }
@@ -2855,15 +2929,16 @@ async function refreshJobs(){
     if(j.clip_rel) acts+=' <button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看</button>';
     acts+=' <button class="ghost" onclick="reuseJob(\''+j.id+'\')">复用</button>';
     d.innerHTML='<span class="'+stCls(j.status)+'">'+(STATUS_CN[j.status]||j.status)+'</span>'+
-      '<span class="meta"><b>'+j.id+'</b><br>'+line2+'<br>'+(note||j.created||'')+'</span>'+
+      '<span class="meta"><b>'+esc(j.name||j.id)+'</b>'+(j.name?' <span class="muted">'+j.id+'</span>':'')+
+      '<br>'+line2+'<br>'+(note||j.created||'')+'</span>'+
       '<span class="jobsacts">'+acts+'</span>';
     box.appendChild(d);
   });
 }
 
 async function jobAct(id,act){
-  const ok=await askConfirm((act==='cancel'?'取消任务 ':'删除记录 ')+'<b>'+id+'</b>？',
-                            act==='cancel'?'取消任务':'删除记录', act==='cancel'?'取消':'删除');
+  const ok=await askConfirm((act==='cancel'?'取消分镜 ':'删除记录 ')+'<b>'+id+'</b>？',
+                            act==='cancel'?'取消分镜':'删除记录', act==='cancel'?'取消':'删除');
   if(!ok) return;
   fetch('/api/jobs/'+id+'/'+act,{method:'POST'}).then(()=>{refreshJobs();refreshOutputs();}); }
 
