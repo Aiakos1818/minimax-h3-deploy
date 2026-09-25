@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """minimax_h3_web.py -- LAN web console for single-segment MiniMax H3 video.
 
-Stdlib only (http.server); it never imports numpy/av/safetensors. A job is one
-prompt plus either reference images/videos/audios (ref2v) or optional first/last
-keyframes (t2v); the worker spawns minimax_h3_runner.py, which drives ComfyUI
-(:8188, resident int4 CLIP + int8 UNet) and drops one mp4 under
-output/{ref2v,t2v}/. Jobs run serially -- the GPUs render one clip at a time.
+Stdlib only (http.server); it never imports numpy/av/safetensors. Jobs are
+grouped into projects (e.g. a story); each job is one prompt plus either
+reference images/videos/audios (ref2v) or optional first/last keyframes (t2v).
+The worker spawns minimax_h3_runner.py, which drives ComfyUI (:8188, resident
+int4 CLIP + int8 UNet) and drops one mp4 under output/<project>/{ref2v,t2v}/.
+Jobs run serially across all projects -- the GPUs render one clip at a time.
 
 Usage:
   ~/ComfyUI-Deploy/comfyenv/bin/python scripts/minimax_h3_web.py --start|--stop|--status
@@ -27,6 +28,8 @@ MEDIA_KINDS = ("ref_image", "ref_video", "ref_audio")
 FRAME_KINDS = ("first_frame", "last_frame")
 MODES = ("t2v", "ref2v")
 OUT_SUBDIRS = {"t2v": "t2v", "ref2v": "ref2v"}
+DEFAULT_PROJECT = "default"
+DEFAULT_PROJECT_NAME = "默认项目"
 ASPECTS = ["16:9 (Widescreen)", "9:16 (Portrait Widescreen)", "1:1 (Square)",
            "4:3 (Standard)", "3:4 (Portrait Standard)", "3:2 (Photo)",
            "2:3 (Portrait Photo)", "21:9 (Ultrawide)"]
@@ -307,21 +310,155 @@ class Manager:
         self.password = password
         self.data = os.path.join(root, ".h3ref2v")
         self.jobs_dir = os.path.join(self.data, "jobs")
+        self.projects_dir = os.path.join(self.data, "projects")
         self.out_root = os.path.join(root, "output")
         self.lock = threading.RLock()
         self._stop = False
         self.jobs = {}
+        self.projects = {}
         self.queue = []
         self.current = None
         self.children = set()
         self.comfy = ComfyHealth(comfy_base)
         self._cv = threading.Condition(self.lock)
         os.makedirs(self.jobs_dir, exist_ok=True)
+        os.makedirs(self.projects_dir, exist_ok=True)
+        self.load_projects()
         for sub in OUT_SUBDIRS.values():
             os.makedirs(os.path.join(self.out_root, sub), exist_ok=True)
 
-    def _out_dir(self, mode):
-        return os.path.join(self.out_root, OUT_SUBDIRS.get(mode, "ref2v"))
+    def _out_dir(self, mode, project=None):
+        sub = OUT_SUBDIRS.get(mode, "ref2v")
+        if project:
+            return os.path.join(self.out_root, project, sub)
+        return os.path.join(self.out_root, sub)
+
+    # ---- projects ----
+    def _proj_dir(self, pid):
+        return os.path.join(self.projects_dir, pid)
+
+    def _write_project(self, p):
+        d = self._proj_dir(p["id"])
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "project.json"), "w", encoding="utf-8") as f:
+            json.dump(p, f, ensure_ascii=False, indent=2)
+
+    def load_projects(self):
+        for d in os.listdir(self.projects_dir):
+            pf = os.path.join(self.projects_dir, d, "project.json")
+            if not os.path.isfile(pf):
+                continue
+            try:
+                with open(pf, encoding="utf-8") as f:
+                    p = json.load(f)
+                p["id"] = d
+                p.setdefault("name", d)
+                p.setdefault("created_ts", os.path.getmtime(pf))
+                self.projects[d] = p
+            except Exception:
+                continue
+        if DEFAULT_PROJECT not in self.projects:
+            self.projects[DEFAULT_PROJECT] = {"id": DEFAULT_PROJECT,
+                                              "name": DEFAULT_PROJECT_NAME,
+                                              "created_ts": time.time()}
+            self._write_project(self.projects[DEFAULT_PROJECT])
+
+    def create_project(self, name):
+        name = (name or "").strip()
+        if not name:
+            return None, "请填写项目名称"
+        if len(name) > 60:
+            return None, "项目名称过长（>60 字符）"
+        pid = "p" + uuid.uuid4().hex[:8]
+        p = {"id": pid, "name": name, "created_ts": time.time()}
+        with self.lock:
+            self.projects[pid] = p
+            self._write_project(p)
+        return p, None
+
+    def rename_project(self, pid, name):
+        name = (name or "").strip()
+        if not name:
+            return False, "请填写项目名称"
+        if len(name) > 60:
+            return False, "项目名称过长（>60 字符）"
+        with self.lock:
+            p = self.projects.get(pid)
+            if not p:
+                return False, "项目不存在"
+            p["name"] = name
+            self._write_project(p)
+        return True, "已重命名"
+
+    def _project_jobs(self, pid):
+        return [j for j in self.jobs.values()
+                if (j.get("st") or {}).get("project") == pid
+                or (j.get("cfg") or {}).get("project") == pid]
+
+    def delete_project(self, pid, mode="detach"):
+        if pid == DEFAULT_PROJECT:
+            return False, "默认项目不能删除"
+        with self.lock:
+            if pid not in self.projects:
+                return False, "项目不存在"
+            jobs = self._project_jobs(pid)
+            busy = [j["id"] for j in jobs
+                    if j["st"].get("status") in ("running", "queued")]
+            if busy:
+                return False, "项目内仍有运行/排队中的任务，请先取消"
+            if mode == "purge":
+                for j in jobs:
+                    rel = j["st"].get("clip_rel")
+                    if rel:
+                        cand = os.path.realpath(os.path.join(self.out_root, rel))
+                        base = os.path.realpath(self.out_root)
+                        if cand.startswith(base + os.sep) and os.path.isfile(cand):
+                            try:
+                                os.remove(cand)
+                            except OSError:
+                                pass
+                    shutil.rmtree(self._job_dir(j["id"]), ignore_errors=True)
+                    del self.jobs[j["id"]]
+            else:
+                for j in jobs:
+                    if j.get("cfg") is not None:
+                        j["cfg"]["project"] = DEFAULT_PROJECT
+                        self.persist_cfg(j)
+                    j["st"]["project"] = DEFAULT_PROJECT
+                    self.persist_status(j)
+            shutil.rmtree(self._proj_dir(pid), ignore_errors=True)
+            del self.projects[pid]
+        return True, ("已删除项目及其任务与产物" if mode == "purge" else "已删除项目，任务已转默认项目")
+
+    def _project_from_rel(self, rel):
+        parts = rel.split("/")
+        if len(parts) >= 3 and parts[0] in self.projects:
+            return parts[0]
+        return DEFAULT_PROJECT
+
+    def project_info(self, pid, jobs=None):
+        p = self.projects[pid]
+        js = self._project_jobs(pid) if jobs is None else jobs
+        counts = {"total": len(js), "running": 0, "queued": 0}
+        cover = None
+        cover_ts = ""
+        for j in js:
+            s = j["st"].get("status")
+            if s in ("running", "queued"):
+                counts[s] += 1
+            rel = j["st"].get("clip_rel")
+            if rel and j["st"].get("created", "") >= cover_ts:
+                cover_ts = j["st"].get("created", "")
+                cover = rel
+        return {"id": p["id"], "name": p.get("name") or p["id"],
+                "created_ts": p.get("created_ts"), "note": p.get("note"),
+                "counts": counts, "cover": cover}
+
+    def projects_list(self):
+        with self.lock:
+            lst = [self.project_info(pid) for pid in self.projects]
+        lst.sort(key=lambda x: (x["id"] != DEFAULT_PROJECT, -(x.get("created_ts") or 0)))
+        return lst
 
     # ---- persistence ----
     def _job_dir(self, jid):
@@ -354,6 +491,13 @@ class Manager:
                 st = None
             job = {"id": d, "cfg": cfg, "st": st or {"id": d},
                    "log": os.path.join(jdir, "log.txt"), "child": None}
+            pid = (cfg or {}).get("project") or job["st"].get("project")
+            if pid not in self.projects:
+                pid = DEFAULT_PROJECT
+            if cfg is not None and cfg.get("project") != pid:
+                cfg["project"] = pid
+                self.persist_cfg(job)
+            job["st"]["project"] = pid
             if not st or st.get("status") in ("running", "queued"):
                 job["st"].update(status="interrupted", ended=NOW(),
                                  err="web 重启中断,需要重新提交")
@@ -371,6 +515,7 @@ class Manager:
                    "st": {"id": jid, "status": "queued", "created": NOW(),
                           "created_ts": time.time(), "tag": jid, "stage": None,
                           "mode": cfg.get("mode", "ref2v"),
+                          "project": cfg.get("project", DEFAULT_PROJECT),
                           "params": cfg["params"], "seed": cfg["seed"],
                           "media": cfg["media"]},
                    "child": None}
@@ -455,7 +600,7 @@ class Manager:
              "--dur", str(p["dur"]), "--aspect", p["aspect"],
              "--megapixels", str(p["megapixels"]), "--multiple", str(p["multiple"]),
              "--steps", str(p["steps"]), "--ref-image-size", p["ref_image_size"],
-             "--out", os.path.join(self._out_dir(mode), "%s.mp4" % cfg["tag"])]
+             "--out", os.path.join(self._out_dir(mode, cfg.get("project")), "%s.mp4" % cfg["tag"])]
         if cfg.get("seed") is not None:
             a += ["--seed", str(cfg["seed"])]
         m = cfg["media"]
@@ -492,6 +637,7 @@ class Manager:
                 if job["st"].get("cancel_requested"):
                     self._set(jid, "status", "cancelled", ended=NOW(), err="取消(等待中)")
                     return
+            os.makedirs(self._out_dir(cfg.get("mode", "ref2v"), cfg.get("project")), exist_ok=True)
             argv = self._build_argv(cfg)
             log.write("cmd: %s\n\n" % " ".join(argv)); log.flush()
             env = dict(os.environ, PYTHONUNBUFFERED="1")
@@ -521,8 +667,8 @@ class Manager:
                 log.write("\n[web] cancelled rc=%s\n" % rc)
             elif rc == 0:
                 mode = cfg.get("mode", "ref2v")
-                rel = "%s/%s.mp4" % (OUT_SUBDIRS.get(mode, "ref2v"), cfg["tag"])
-                p = os.path.join(self.out_root, rel)
+                p = os.path.join(self._out_dir(mode, cfg.get("project")), "%s.mp4" % cfg["tag"])
+                rel = os.path.relpath(p, self.out_root).replace("\\", "/")
                 size = os.path.getsize(p) if os.path.isfile(p) else 0
                 frames = ref2v_length(cfg["params"]["dur"])
                 self._set(jid, "status", "done", ended=NOW(), exit=0, err=None,
@@ -580,6 +726,7 @@ class Manager:
         st = job["st"]
         return {"id": st["id"], "status": st.get("status"), "created": st.get("created"),
                 "created_ts": st.get("created_ts"),
+                "project": st.get("project") or (job.get("cfg") or {}).get("project") or DEFAULT_PROJECT,
                 "mode": st.get("mode") or (job.get("cfg") or {}).get("mode") or "ref2v",
                 "ended": st.get("ended"), "duration": st.get("duration"),
                 "stage": st.get("stage"), "progress": st.get("progress"),
@@ -599,13 +746,15 @@ class Manager:
                 "vram": self.comfy.vram(), "blocking": self.blocking_busy(),
                 "current": cur, "queue": q}
 
-    def jobs_list(self):
+    def jobs_list(self, project=None):
         with self.lock:
-            lst = [self.info(j) for j in self.jobs.values()]
+            lst = [self.info(j) for j in self.jobs.values()
+                   if project is None or j["st"].get("project") == project
+                   or (j.get("cfg") or {}).get("project") == project]
         lst.sort(key=lambda x: x.get("created") or "", reverse=True)
         return lst
 
-    def clips_list(self):
+    def clips_list(self, project=None):
         out_root = self.out_root
         clips = []
         meta = {}
@@ -613,14 +762,15 @@ class Manager:
             rel = job["st"].get("clip_rel")
             if rel:
                 meta[os.path.basename(rel)] = self.info(job)
-        paths = []
-        for sub in OUT_SUBDIRS.values():
-            paths += glob.glob(os.path.join(out_root, sub, "*.mp4"))
+        paths = glob.glob(os.path.join(out_root, "**", "*.mp4"), recursive=True)
         for p in sorted(paths, key=os.path.getmtime, reverse=True):
             rel = os.path.relpath(p, out_root).replace("\\", "/")
             m = meta.get(os.path.basename(p), {})
+            pid = m.get("project") or self._project_from_rel(rel)
+            if project is not None and pid != project:
+                continue
             clips.append({"rel": rel, "name": os.path.basename(p),
-                          "size": os.path.getsize(p),
+                          "size": os.path.getsize(p), "project": pid,
                           "ts": time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(p))),
                           "job": m.get("id"), "seconds": m.get("clip_seconds"),
                           "frames": m.get("clip_frames"), "seed": m.get("seed"),
@@ -745,8 +895,11 @@ def make_handler(mgr):
                 self.wfile.write(body)
             elif u.path == "/api/state":
                 self._json(200, mgr.state())
+            elif u.path == "/api/projects":
+                self._json(200, {"projects": mgr.projects_list()})
             elif u.path == "/api/jobs":
-                self._json(200, {"jobs": mgr.jobs_list()})
+                proj = parse_qs(u.query).get("project", [None])[0] or None
+                self._json(200, {"jobs": mgr.jobs_list(proj)})
             elif u.path.startswith("/api/jobs/"):
                 rest = u.path[len("/api/jobs/"):]
                 jid, _, sub = rest.partition("/")
@@ -770,7 +923,8 @@ def make_handler(mgr):
                 else:
                     self._err(404, "not found")
             elif u.path == "/api/outputs":
-                self._json(200, mgr.clips_list())
+                proj = parse_qs(u.query).get("project", [None])[0] or None
+                self._json(200, mgr.clips_list(proj))
             else:
                 m = _OUTPUT_RE.match(u.path)
                 if m:
@@ -797,6 +951,29 @@ def make_handler(mgr):
                 jid, action = m.group(1), m.group(2)
                 ok, msg = (mgr.cancel(jid) if action == "cancel" else mgr.delete(jid))
                 self._json(200 if ok else 409, {"ok": ok, "msg": msg}); return
+            pm = re.match(r"^/api/projects/([^/]+)/(rename|delete)$", u.path)
+            if pm:
+                pid, action = pm.group(1), pm.group(2)
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    js = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                except Exception:
+                    self._err(400, "bad json"); return
+                if action == "rename":
+                    ok, msg = mgr.rename_project(pid, js.get("name"))
+                    self._json(200 if ok else 400, {"ok": ok, "msg": msg}); return
+                ok, msg = mgr.delete_project(pid, js.get("mode") or "detach")
+                self._json(200 if ok else 409, {"ok": ok, "msg": msg}); return
+            if u.path == "/api/projects":
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    js = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                except Exception:
+                    self._err(400, "bad json"); return
+                p, err = mgr.create_project(js.get("name"))
+                if err:
+                    self._err(400, err); return
+                self._json(201, mgr.project_info(p["id"])); return
             if u.path == "/api/service/stop":
                 if mgr.current:
                     self._json(409, {"ok": False, "msg": "有任务在跑, 先取消"}); return
@@ -884,11 +1061,15 @@ def make_handler(mgr):
             elif any(n.values()):
                 self._err(400, "文生视频不支持参考素材"); return
 
+            project = _first(fields, "project", DEFAULT_PROJECT) or DEFAULT_PROJECT
+            if project not in mgr.projects:
+                self._err(400, "项目不存在"); return
             seed = _to_int(_first(fields, "seed"), None, lo=0, hi=2**63 - 1)
             if seed is None:
                 seed = random.randint(0, 2**63 - 1)
             cfg = {
                 "mode": mode,
+                "project": project,
                 "tag": None,  # filled with the job id
                 "seed": seed,
                 "params": {
@@ -950,7 +1131,8 @@ header h1{font-size:16px;margin:0 8px 0 0}
 .pill{font-size:12px;padding:3px 9px;border-radius:999px;background:#20242d;color:var(--mut);white-space:nowrap}
 .pill.on{color:#0b0d11;background:var(--ok)} .pill.off{color:#0b0d11;background:var(--err)}
 .spacer{flex:1}
-main{display:grid;grid-template-columns:minmax(340px,460px) 1fr;gap:14px;padding:14px;max-width:1400px;margin:0 auto}
+main{padding:14px;max-width:1400px;margin:0 auto}
+.cols{display:grid;grid-template-columns:minmax(340px,460px) 1fr;gap:14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
 .card h2{font-size:14px;margin:0 0 10px;color:var(--mut);font-weight:600;letter-spacing:.03em}
 .cardhead{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}
@@ -1015,13 +1197,23 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .optacts button.primary,.optacts button.ghost{flex:1 1 0;width:auto;height:38px;margin:0;padding:0 10px;
        display:flex;align-items:center;justify-content:center;box-sizing:border-box}
 .muted{color:var(--mut);font-size:12px}
-@media(max-width:980px){main{grid-template-columns:1fr}}
+.projgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.projcard{background:#0e1116;border:1px solid var(--line);border-radius:10px;overflow:hidden;cursor:pointer;
+          transition:border-color .15s}
+.projcard:hover{border-color:var(--acc)}
+.projcard .cover,.projcard .ph{width:100%;aspect-ratio:16/9;background:#000;display:block;object-fit:cover}
+.projcard .ph{display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:12px}
+.projcard .body{padding:8px 10px}
+.projcard .nm{font-weight:600;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.projcard .meta2{font-size:12px;color:var(--mut)}
+.bcbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+@media(max-width:980px){.cols{grid-template-columns:1fr}}
 @media(max-width:640px){.grid3{grid-template-columns:1fr 1fr}textarea,input,select{font-size:16px}}
 </style>
 </head>
 <body>
 <header>
-  <h1>MiniMax H3</h1>
+  <h1 style="cursor:pointer" onclick="goHome()" title="全部项目">MiniMax H3</h1>
   <span id="pComfy" class="pill off">ComfyUI ?</span>
   <span id="pVram" class="pill">VRAM --</span>
   <span id="pQ" class="pill">队列 0</span>
@@ -1029,10 +1221,27 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   <button class="ghost" onclick="releaseVram()">释放显存</button>
 </header>
 <main>
-  <div>
+  <div id="homeView">
     <div class="card">
-      <div class="cardhead">
-        <h2>新建任务</h2>
+      <div class="cardhead"><h2>新建项目</h2></div>
+      <div style="display:flex;gap:8px">
+        <input id="newProjName" placeholder="如：超人大战蝙蝠侠" onkeydown="if(event.key==='Enter')newProject()">
+        <button class="ghost" style="flex:0 0 auto" onclick="newProject()">创建</button>
+      </div>
+      <div class="muted" id="projMsg" style="margin-top:8px"></div>
+    </div>
+    <div class="card">
+      <h2>项目</h2>
+      <div id="projList" class="projgrid"><span class="muted">加载中…</span></div>
+    </div>
+  </div>
+  <div id="projView" style="display:none">
+    <div class="card" id="projHead"></div>
+    <div class="cols">
+      <div>
+        <div class="card">
+          <div class="cardhead">
+            <h2>新建任务</h2>
         <select id="mode" onchange="onModeChange()">
           <option value="t2v">文生视频</option>
           <option value="ref2v">参考生视频</option>
@@ -1098,6 +1307,8 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
       </details>
     </div>
   </div>
+    </div>
+  </div>
 </main>
 <div class="modal" id="modal" onclick="if(event.target===this)closeModal()">
   <div class="box">
@@ -1121,9 +1332,94 @@ const $ = (id)=>document.getElementById(id);
 const esc = (s)=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ASPECTS = __ASPECTS__;
 let logOffset = 0, lastJob = null, jobsById = {}, curStart = 0, curRunning = false;
+let projects = [], projNames = {}, curProject = null, projectsLoaded = false;
 const STATUS_CN = {queued:'排队中', running:'进行中', done:'已完成', failed:'失败', cancelled:'已取消', interrupted:'已中断'};
 const MEDIA_CN = {ref_image:'图', ref_video:'视频', ref_audio:'音频'};
 const MODE_CN = {t2v:'文生视频', ref2v:'参考生视频'};
+function projName(pid){ return projNames[pid] || (pid==='default'?'默认项目':(pid||'')); }
+function projSub(p){
+  return [p.counts.total+' 个任务',
+          p.counts.running?p.counts.running+' 进行中':null,
+          p.counts.queued?p.counts.queued+' 排队':null].filter(Boolean).join(' · ');
+}
+async function refreshProjects(){
+  const r=await api('/api/projects'); if(!r) return;
+  projects=r.projects||[]; projNames={};
+  projects.forEach(p=>projNames[p.id]=p.name);
+  projectsLoaded=true;
+  const box=$('projList');
+  const sig=projects.map(p=>[p.id,p.name,p.counts.total,p.counts.running,p.counts.queued,p.cover||''].join(',')).join('\n');
+  if(box._sig!==sig){
+    box._sig=sig;
+    box.innerHTML='';
+    if(!projects.length) box.innerHTML='<span class="muted">暂无项目</span>';
+    projects.forEach(p=>{
+      const d=document.createElement('div'); d.className='projcard'; d.onclick=()=>openProject(p.id);
+      const cover=(p.cover && p.cover.slice(-4)==='.mp4')
+        ? '<video class="cover" preload="metadata" muted playsinline src="/files/'+encodeURI(p.cover)+'#t=0.1"></video>'
+        : '<div class="ph">暂无产物</div>';
+      d.innerHTML=cover+'<div class="body"><div class="nm">'+esc(p.name)+'</div>'+
+        '<div class="meta2">'+projSub(p)+'</div></div>';
+      box.appendChild(d);
+    });
+  }
+  if(curProject) renderProjHead();
+}
+function renderProjHead(){
+  const p=projects.find(x=>x.id===curProject); if(!p){ return; }
+  const canEdit=(curProject!=='default');
+  $('projHead').innerHTML='<div class="cardhead"><h2 style="color:var(--fg);font-size:16px">'+esc(p.name)+'</h2>'+
+    '<span class="bcbar">'+(canEdit?'<button class="ghost" onclick="renameProject()">改名</button>'+
+      '<button class="ghost" onclick="deleteProject()">删除</button>':'')+
+      '<button class="ghost" onclick="goHome()">全部项目</button></span></div>'+
+    '<div class="muted">'+projSub(p)+'</div>';
+}
+function openProject(pid){ location.hash='#/p/'+encodeURIComponent(pid); }
+function goHome(){ location.hash='#/'; }
+function route(){
+  const m=location.hash.match(/^#\/p\/(.+)$/);
+  const pid=m?decodeURIComponent(m[1]):null;
+  if(pid && projNames[pid]!==undefined){
+    if(curProject!==pid){ curProject=pid; $('jobs')._sig=''; $('clips')._sig=''; }
+    $('homeView').style.display='none'; $('projView').style.display='';
+    renderProjHead(); refreshJobs(); refreshOutputs();
+  }else{
+    curProject=null;
+    $('homeView').style.display=''; $('projView').style.display='none';
+  }
+}
+window.addEventListener('hashchange',route);
+async function newProject(){
+  const name=$('newProjName').value.trim();
+  if(!name){ $('projMsg').textContent='请填写项目名称'; return; }
+  const r=await fetch('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name})});
+  const j=await r.json().catch(()=>({}));
+  if(r.status===201){ $('newProjName').value=''; $('projMsg').textContent='已创建：'+j.name;
+    await refreshProjects(); openProject(j.id); }
+  else $('projMsg').textContent='创建失败：'+(j.error||r.status);
+}
+async function renameProject(){
+  const p=projects.find(x=>x.id===curProject); if(!p) return;
+  const name=prompt('项目名称',p.name); if(name==null) return;
+  const r=await fetch('/api/projects/'+encodeURIComponent(curProject)+'/rename',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){ alert('改名失败：'+(j.error||j.msg||r.status)); return; }
+  await refreshProjects();
+}
+async function deleteProject(){
+  const p=projects.find(x=>x.id===curProject); if(!p) return;
+  const ans=prompt('删除项目「'+p.name+'」\n输入 1：删除项目及其任务与产物\n输入 2：仅删除项目，任务转默认项目',
+                   '2');
+  if(ans==null) return;
+  const mode=(ans.trim()==='1')?'purge':'detach';
+  const r=await fetch('/api/projects/'+encodeURIComponent(curProject)+'/delete',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){ alert('删除失败：'+(j.error||j.msg||r.status)); return; }
+  goHome(); await refreshProjects();
+}
 function friendlyErr(e){
   if(!e) return '';
   if(/runner exited rc=/.test(e)) return '生成进程异常退出';
@@ -1155,11 +1451,11 @@ function fmtDur(sec){ sec=Math.max(0,Math.floor(sec)); return String(Math.floor(
 function renderCurrent(j){
   curStart = j.created_ts || curStart || 0;
   curRunning = (j.status==='running'||j.status==='queued');
-  const sig=[j.id,j.status,friendlyStatus(j),j.mode||'',j.clip_rel||'',j.err||'',j.detail||'',mediaBrief(j.media)].join('|');
+  const sig=[j.id,j.status,friendlyStatus(j),j.mode||'',j.project||'',j.clip_rel||'',j.err||'',j.detail||'',mediaBrief(j.media)].join('|');
   if($('cur')._sig===sig) return;
   $('cur')._sig=sig;
   const p=j.params||{};
-  const meta=[MODE_CN[j.mode]||'', mediaBrief(j.media), p.dur?p.dur+'s':'', p.aspect?p.aspect.split(' ')[0]:'',
+  const meta=[projName(j.project), MODE_CN[j.mode]||'', mediaBrief(j.media), p.dur?p.dur+'s':'', p.aspect?p.aspect.split(' ')[0]:'',
               p.megapixels?p.megapixels+'MP':'', p.steps?p.steps+'步':'', j.seed?('seed '+j.seed):''].filter(Boolean).join(' · ');
   let bar='';
   if(j.status==='running' && j.progress && j.progress.total){
@@ -1248,10 +1544,12 @@ function onModeChange(){
 }
 
 function submit(){
+  if(!curProject){ alert('请先进入一个项目'); goHome(); return; }
   const mode=$('mode').value;
   const prompt=$('prompt').value.trim();
   if(!prompt){ alert('请填写提示词'); return; }
   const fd=new FormData();
+  fd.append('project', curProject);
   fd.append('mode', mode);
   fd.append('prompt', prompt);
   fd.append('dur', $('dur').value); fd.append('steps', $('steps').value);
@@ -1322,7 +1620,8 @@ function updateUsedElapsed(){
 }
 
 async function refreshJobs(){
-  const r=await api('/api/jobs'); if(!r) return;
+  if(!curProject) return;
+  const r=await api('/api/jobs?project='+encodeURIComponent(curProject)); if(!r) return;
   const box=$('jobs');
   const jobs=r.jobs.slice(0,50);
   const sig=jobs.map(j=>[j.id,j.status,(j.stage&&j.stage.label)||'',
@@ -1356,7 +1655,8 @@ function jobAct(id,act){ if(!confirm(act==='cancel'?'取消任务 '+id+'?':'删�
   fetch('/api/jobs/'+id+'/'+act,{method:'POST'}).then(()=>{refreshJobs();refreshOutputs();}); }
 
 async function refreshOutputs(){
-  const r=await api('/api/outputs'); if(!r) return;
+  if(!curProject) return;
+  const r=await api('/api/outputs?project='+encodeURIComponent(curProject)); if(!r) return;
   const box=$('clips');
   const sig=r.clips.map(c=>c.rel+'|'+c.size).join('\n');
   if(box._sig===sig) return;
@@ -1412,8 +1712,10 @@ function fallbackCopy(){
 function applyOpt(){ const t=$('optText').value; if(!t) return; $('prompt').value=t; closeOpt(); }
 
 onModeChange();
-refreshState(); refreshJobs(); refreshOutputs();
-setInterval(refreshState,2000); setInterval(refreshJobs,5000); setInterval(refreshOutputs,5000); setInterval(pollLog,1500);
+(async()=>{ await refreshProjects(); route(); })();
+refreshState();
+setInterval(refreshState,2000); setInterval(refreshProjects,5000);
+setInterval(refreshJobs,5000); setInterval(refreshOutputs,5000); setInterval(pollLog,1500);
 </script>
 </body>
 </html>"""
