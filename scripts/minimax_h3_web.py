@@ -3265,16 +3265,11 @@ function detailMaterial(mid){
   $('jBody').innerHTML=h;
   $('jobModal').classList.add('open');
 }
-function suggestName(base){
-  base=String(base||'图片'); let i=2;
-  while(materials.some(x=>(x.name||'')===(base+'-'+i))) i++;
-  return base+'-'+i;
-}
 function reuseMaterial(mid){
   const m=matById(mid); if(!m) return;
   if(!curProject){ notice('请先进入一个项目'); return; }
   if(!m.prompt){ notice('该素材没有可复用的生成参数'); return; }
-  openShotModal('复用图片素材', suggestName(m.name), '确定', (name)=>{ imgName=name; showImgForm(); prefillImageForm(m); },'image');
+  openShotModal('复用图片素材', m.name, '确定', (name)=>{ imgName=name; showImgForm(); prefillImageForm(m); },'image');
 }
 function prefillImageForm(m){
   const mode=(m.gen==='i2i')?'i2i':'t2i';
