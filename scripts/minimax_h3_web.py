@@ -2012,6 +2012,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .optrow{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}
 .optrow b{min-width:0;overflow-wrap:anywhere}
 .optrow button{flex:0 0 auto;white-space:nowrap}
+.optrow .optbtns{display:flex;gap:8px;flex:0 0 auto}
 .optacts{display:flex;gap:8px;margin-top:10px}
 .optacts button.primary,.optacts button.ghost{flex:1 1 0;width:auto;height:38px;margin:0;padding:0 10px;
        display:flex;align-items:center;justify-content:center;box-sizing:border-box}
@@ -2099,6 +2100,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
   .formgrid>.fcol:last-child{order:1}
   #taskCard>.formgrid>.fcol:first-child{order:1}
   #taskCard>.formgrid>.fcol:last-child{order:2;padding-top:43px}
+  #imgI2I>.formgrid>.fcol:first-child{padding-top:30px}
   .formgrid textarea{min-height:214px}
   .params{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:4px}
   .params>.grid3,.params>.grid2{display:contents}
@@ -2268,8 +2270,12 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
       <div id="imgI2I" style="display:none">
         <div class="formgrid">
           <div class="fcol">
-            <label>参考图片素材</label>
-            <select id="imgI2ISrc"></select>
+            <div class="filebox">
+              <label>参考图片素材</label>
+              <div class="fbact"><button type="button" class="ghost" onclick="openPickImg()">选择素材</button></div>
+              <ul id="lImgSrc" class="slotgrid"></ul>
+            </div>
+            <input type="hidden" id="imgI2ISrc">
             <div class="grid2" style="margin-top:10px">
               <div><label>重绘强度</label>
                 <input id="imgI2IStrength" type="number" value="0.6" min="0.05" max="1" step="0.05"></div>
@@ -2367,12 +2373,12 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
 </main>
 <div class="modal" id="pickModal" onclick="if(event.target===this)closePick()">
   <div class="box" style="width:min(900px,98vw);max-height:88vh;overflow:auto">
-    <div class="optrow"><b id="pickTitle">选择素材</b><button class="ghost" onclick="closePick()">关闭</button></div>
+    <div class="optrow"><b id="pickTitle">选择素材</b><span class="optbtns"><button class="ghost" id="pickAddBtn" onclick="pickAddOpen()">添加素材</button><button class="ghost" onclick="closePick()">关闭</button></span></div>
     <div class="muted" id="pickHint" style="margin-bottom:8px"></div>
     <div id="pickGrid" class="matgrid"></div>
     <div class="optacts">
       <button class="ghost" onclick="closePick()">取消</button>
-      <button class="primary" id="pickOk" onclick="pickOk()">加入</button>
+      <button class="primary" id="pickOk" onclick="pickOk()">选择</button>
     </div>
   </div>
 </div>
@@ -3047,6 +3053,7 @@ function renderMaterials(){
   }
   $('matSub').textContent=materials.length? (materials.length+' 个素材') : '';
   renderImageList();
+  renderImgI2ISrc();
   renderProjHead();
 }
 async function refreshMaterials(){
@@ -3066,20 +3073,28 @@ function onImgModeChange(){
   if(m==='i2i') renderImgI2ISrc();
 }
 function renderImgI2ISrc(){
-  const sel=$('imgI2ISrc'); if(!sel) return;
-  const cur=sel.value;
-  const list=materials.filter(m=>m.kind==='image' && m.exists);
-  sel.innerHTML='';
-  if(!list.length){
-    const o=document.createElement('option'); o.value='';
-    o.textContent='（没有可用的图片素材）'; sel.appendChild(o); return;
-  }
-  list.forEach(m=>{
-    const o=document.createElement('option'); o.value=m.id;
-    o.textContent=(m.name||m.id)+' · '+(GEN_CN[m.gen]||'图片');
-    sel.appendChild(o);
-  });
-  if(cur && list.some(m=>m.id===cur)) sel.value=cur;
+  const inp=$('imgI2ISrc'), list=$('lImgSrc'); if(!inp||!list) return;
+  const m=matById(inp.value);
+  list.innerHTML='';
+  if(!m || m.kind!=='image'){ inp.value=''; return; }
+  const li=document.createElement('li'); li.className='slotcard';
+  li.innerHTML=matPreview(m,curProject,false)+'<div class="nm" title="'+esc(m.name)+'">'+esc(m.name)+'</div>';
+  const acts=document.createElement('div'); acts.className='acts';
+  const rm=document.createElement('button'); rm.className='rm'; rm.textContent='移除';
+  rm.onclick=()=>{ inp.value=''; renderImgI2ISrc(); };
+  acts.appendChild(rm); li.appendChild(acts); list.appendChild(li);
+}
+function openPickImg(){
+  if(!curProject){ notice('请先进入一个项目'); return; }
+  if(!materials.some(m=>m.kind==='image' && m.exists)){
+    notice('素材库中还没有图片素材，请先在「素材库」上传。'); return; }
+  pickMode='mat'; pickKind='img_i2i'; pickSingle=true;
+  pickSel=new Set($('imgI2ISrc').value?[$('imgI2ISrc').value]:[]);
+  $('pickTitle').textContent='选择素材 · 参考图片';
+  $('pickHint').textContent='单选：点一张图片素材';
+  $('pickAddBtn').style.display='';
+  renderPickGrid();
+  $('pickModal').classList.add('open');
 }
 function openImageCreator(){
   if(!curProject){ notice('请先进入一个项目'); return; }
@@ -3124,6 +3139,7 @@ function clearImageForm(){
   $('imgSteps').value=8; $('imgMegapixels').value='0.4'; $('imgAspect').value=ASPECTS[0];
   $('imgI2IPrompt').value=''; $('imgI2ISeed').value='';
   $('imgI2ISteps').value=8; $('imgI2IMegapixels').value='0.4'; $('imgI2IStrength').value=0.6;
+  $('imgI2ISrc').value=''; renderImgI2ISrc();
   $('imgMode').value='t2i'; onImgModeChange();
   $('imgStatus').textContent='';
 }
@@ -3255,8 +3271,8 @@ function prefillImageForm(m){
   const mode=(m.gen==='i2i')?'i2i':'t2i';
   $('imgMode').value=mode; onImgModeChange();
   if(mode==='i2i'){
+    $('imgI2ISrc').value=m.init_material_id||'';
     renderImgI2ISrc();
-    if(m.init_material_id) $('imgI2ISrc').value=m.init_material_id;
     $('imgI2IPrompt').value=m.prompt||'';
     if(m.megapixels!=null) $('imgI2IMegapixels').value=m.megapixels;
     if(m.steps!=null) $('imgI2ISteps').value=m.steps;
@@ -3336,6 +3352,11 @@ function matAddOpen(kind){
   inp.value='';
   inp.click();
 }
+function pickAddOpen(){
+  if(!$('pickModal').classList.contains('open') || pickMode==='clip') return;
+  const kind=(pickKind==='img_i2i')?'image':SLOT_MEDIA[pickKind];
+  if(kind) matAddOpen(kind);
+}
 async function onMatAddPick(){
   const inp=$('matAddFile');
   const f=inp.files && inp.files[0]; if(!f) return;
@@ -3377,7 +3398,9 @@ function uploadMaterial(name,f){
         $('matMsg').textContent='上传失败：'+msg; notice('上传失败：'+msg); resolve(); return; }
       materials=j.materials||materials;
       $('matMsg').textContent='已上传：'+((j.material&&j.material.name)||name);
-      renderMaterials(); renderAllSlots(); resolve();
+      renderMaterials(); renderAllSlots();
+      if($('pickModal').classList.contains('open')) renderPickGrid();
+      resolve();
     };
     xhr.onerror=()=>{ upXhr=null; $('upModal').classList.remove('open');
       $('matMsg').textContent='网络错误'; resolve(); };
@@ -3416,16 +3439,15 @@ async function openPick(kind, mode){
     pickSel=new Set(selClip[kind]);
     $('pickTitle').textContent='选择产物 · '+SLOT_CN[kind].cn;
     $('pickHint').textContent='可多选：点选多个产物作为参考视频';
+    $('pickAddBtn').style.display='none';
   }else{
     const mk=SLOT_MEDIA[kind];
-    if(!materials.some(m=>m.kind===mk)){
-      notice('素材库中还没有'+MAT_KIND_CN[mk]+'素材，请先在「素材库」上传。'); return;
-    }
     pickKind=kind; pickSingle=(kind==='first_frame'||kind==='last_frame');
     pickSel=new Set(selMat[kind]);
     $('pickTitle').textContent='选择素材 · '+SLOT_CN[kind].cn;
     $('pickHint').textContent=pickSingle? '单选：点一张'+MAT_KIND_CN[mk]+'素材'
                                        : '可多选：点选多个'+MAT_KIND_CN[mk]+'素材';
+    $('pickAddBtn').style.display='';
   }
   renderPickGrid();
   $('pickModal').classList.add('open');
@@ -3458,7 +3480,8 @@ function renderPickGrid(){
     });
     return;
   }
-  const list=materials.filter(m=>m.kind===SLOT_MEDIA[pickKind] && m.exists);
+  const mk=(pickKind==='img_i2i')?'image':SLOT_MEDIA[pickKind];
+  const list=materials.filter(m=>m.kind===mk && m.exists);
   if(!list.length){ box.innerHTML='<div class="matempty">暂无可用素材</div>'; return; }
   list.forEach(m=>{
     const d=document.createElement('div'); d.className='matcard pick'+(pickSel.has(m.id)?' sel':'');
@@ -3472,6 +3495,10 @@ function renderPickGrid(){
 }
 function pickOk(){
   if(!pickKind) return;
+  if(pickKind==='img_i2i'){
+    const id=Array.from(pickSel)[0]||'';
+    $('imgI2ISrc').value=id; renderImgI2ISrc(); closePick(); return;
+  }
   const old=slotItems(pickKind);
   let newItems;
   if(pickMode==='clip'){
