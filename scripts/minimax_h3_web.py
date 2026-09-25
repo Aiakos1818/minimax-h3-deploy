@@ -42,7 +42,8 @@ PREVIEW_MAX = 1600
 THUMB_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_thumb.py")
 VTHUMB_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_vthumb.py")
 MODES = ("t2v", "ref2v")
-OUT_SUBDIRS = {"t2v": "t2v", "ref2v": "ref2v", "edit": "edit", "t2i": "t2i"}
+IMAGE_MODES = ("t2i", "i2i")
+OUT_SUBDIRS = {"t2v": "t2v", "ref2v": "ref2v", "edit": "edit", "t2i": "t2i", "i2i": "i2i"}
 TRANSITIONS = ("cut", "fade", "dissolve", "push")
 EDIT_ASPECT_OPTS = [("0", "原始画幅"), ("2.39", "2.39:1 宽银幕"), ("16:9", "16:9 横屏"),
                     ("9:16", "9:16 竖屏"), ("1:1", "1:1 方形"), ("4:3", "4:3 横版"),
@@ -488,7 +489,7 @@ class Manager:
     def project_info(self, pid, jobs=None):
         p = self.projects[pid]
         js = self._project_jobs(pid) if jobs is None else jobs
-        js = [j for j in js if (j["st"].get("mode") or "ref2v") not in ("edit", "t2i")]
+        js = [j for j in js if (j["st"].get("mode") or "ref2v") not in ("edit", "t2i", "i2i")]
         counts = {"total": len(js), "running": 0, "queued": 0}
         cover = None
         cover_ts = ""
@@ -544,6 +545,9 @@ class Manager:
                         "gen": m.get("gen"), "prompt": m.get("prompt"),
                         "aspect": m.get("aspect"), "megapixels": m.get("megapixels"),
                         "steps": m.get("steps"),
+                        "strength": m.get("strength"),
+                        "init_material_id": m.get("init_material_id"),
+                        "init_name": m.get("init_name"),
                         "seed": (None if m.get("seed") is None else str(m.get("seed"))),
                         "thumb_v": v, "exists": exists})
         return out
@@ -677,7 +681,8 @@ class Manager:
                 f.write(content)
             mat = {"id": mid, "name": name, "kind": kind, "file": stored,
                    "size": len(content), "ts": NOW(), "gen": gen}
-            for k in ("prompt", "aspect", "megapixels", "steps", "seed"):
+            for k in ("prompt", "aspect", "megapixels", "steps", "seed",
+                      "strength", "init_material_id", "init_name"):
                 if meta and meta.get(k) is not None:
                     mat[k] = meta[k]
             p.setdefault("materials", []).append(mat)
@@ -887,12 +892,15 @@ class Manager:
     def _build_argv(self, cfg):
         p = cfg["params"]
         mode = cfg.get("mode", "ref2v")
-        if mode == "t2i":
-            a = [sys.executable, self.image_driver, "--tag", cfg["tag"],
+        if mode in IMAGE_MODES:
+            a = [sys.executable, self.image_driver, "--mode", mode, "--tag", cfg["tag"],
                  "--prompt", p["prompt"], "--aspect", p["aspect"],
                  "--megapixels", str(p["megapixels"]), "--steps", str(p["steps"]),
-                 "--out", os.path.join(self._out_dir("t2i", cfg.get("project")),
+                 "--out", os.path.join(self._out_dir(mode, cfg.get("project")),
                                        "%s.png" % cfg["tag"])]
+            if mode == "i2i":
+                a += ["--strength", str(p.get("strength", 0.6)),
+                      "--init-image", cfg["media"]["init_image"]]
             if cfg.get("seed") is not None:
                 a += ["--seed", str(cfg["seed"])]
             return a
@@ -940,7 +948,7 @@ class Manager:
                     self._set(jid, "status", "cancelled", ended=NOW(), err="取消(等待中)")
                     return
             os.makedirs(self._out_dir(mode, cfg.get("project")), exist_ok=True)
-            ext = "png" if mode == "t2i" else "mp4"
+            ext = "png" if mode in IMAGE_MODES else "mp4"
             out_path = os.path.join(self._out_dir(mode, cfg.get("project")), "%s.%s" % (cfg["tag"], ext))
             argv = self._edit_argv(cfg, out_path) if mode == "edit" else self._build_argv(cfg)
             log.write("cmd: %s\n\n" % " ".join(argv)); log.flush()
@@ -971,7 +979,7 @@ class Manager:
                 log.write("\n[web] cancelled rc=%s\n" % rc)
             elif rc == 0:
                 p = os.path.join(self._out_dir(mode, cfg.get("project")), "%s.%s" % (cfg["tag"], ext))
-                if mode == "t2i":
+                if mode in IMAGE_MODES:
                     self._finish_image(jid, cfg, job, p, log)
                     log.flush(); return
                 rel = os.path.relpath(p, self.out_root).replace("\\", "/")
@@ -991,7 +999,8 @@ class Manager:
             log.flush()
 
     def _finish_image(self, jid, cfg, job, p, log):
-        """A t2i job succeeded: store the PNG as an image material."""
+        """A t2i/i2i job succeeded: store the PNG as an image material."""
+        mode = cfg.get("mode", "t2i")
         project = cfg.get("project", DEFAULT_PROJECT)
         try:
             with open(p, "rb") as f:
@@ -1003,12 +1012,16 @@ class Manager:
             log.write("\n[web] failed: no png\n"); return
         base = cfg.get("name") or cfg["params"].get("prompt") or "图片"
         name = self._unique_mat_name(project, base)
-        p = cfg["params"]
-        meta = {"prompt": p.get("prompt"), "aspect": p.get("aspect"),
-                "megapixels": p.get("megapixels"), "steps": p.get("steps"),
+        params = cfg["params"]
+        meta = {"prompt": params.get("prompt"), "aspect": params.get("aspect"),
+                "megapixels": params.get("megapixels"), "steps": params.get("steps"),
                 "seed": cfg.get("seed")}
+        if mode == "i2i":
+            meta["strength"] = params.get("strength")
+            meta["init_material_id"] = cfg.get("init_material_id")
+            meta["init_name"] = cfg.get("init_name")
         mat, err = self.add_material(project, name, "%s.png" % cfg["tag"], content,
-                                     gen="t2i", meta=meta)
+                                     gen=mode, meta=meta)
         if err:
             self._set(jid, "status", "failed", ended=NOW(), err=err)
             log.write("\n[web] failed: %s\n" % err); return
@@ -1831,6 +1844,7 @@ def make_handler(mgr):
             project = (js.get("project") or DEFAULT_PROJECT) or DEFAULT_PROJECT
             if project not in mgr.projects:
                 self._err(400, "项目不存在"); return
+            mode = js.get("mode") if js.get("mode") in IMAGE_MODES else "t2i"
             prompt = (js.get("prompt") or "").strip()
             if not prompt:
                 self._err(400, "请填写提示词"); return
@@ -1842,9 +1856,20 @@ def make_handler(mgr):
             seed = _to_int(js.get("seed"), None, lo=0, hi=2**63 - 1)
             if seed is None:
                 seed = random.randint(0, 2**63 - 1)
+            media, init_mid, init_name = {}, None, None
+            if mode == "i2i":
+                init_mid = js.get("init") or ""
+                mats = (mgr.projects.get(project) or {}).get("materials") or []
+                ent = next((m for m in mats if m.get("id") == init_mid), None)
+                path = mgr.material_path(project, init_mid)
+                if not ent or not path or (ent.get("kind") or "image") != "image":
+                    self._err(400, "请选择有效的参考图片素材"); return
+                init_name = ent.get("name") or ent.get("file") or ""
+                media["init_image"] = path
             cfg = {
-                "mode": "t2i", "project": project,
+                "mode": mode, "project": project,
                 "name": (js.get("name") or "").strip()[:60], "tag": None, "seed": seed,
+                "init_material_id": init_mid, "init_name": init_name,
                 "params": {
                     "prompt": prompt, "aspect": aspect,
                     "megapixels": _to_float(js.get("megapixels"), 0.4, lo=0.1, hi=2.0),
@@ -1852,8 +1877,10 @@ def make_handler(mgr):
                     "steps": _to_int(js.get("steps"), 8, lo=1, hi=50),
                     "dur": 0,
                 },
-                "media": {},
+                "media": media,
             }
+            if mode == "i2i":
+                cfg["params"]["strength"] = _to_float(js.get("strength"), 0.6, lo=0.05, hi=1.0)
             jid = mgr.new_id()
             cfg["tag"] = jid
             os.makedirs(mgr._job_dir(jid), exist_ok=True)
@@ -2221,7 +2248,33 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
           </div>
         </div>
       </div>
-      <div id="imgI2I" style="display:none"><div class="muted">图生图开发中，敬请期待。</div></div>
+      <div id="imgI2I" style="display:none">
+        <div class="formgrid">
+          <div class="fcol">
+            <label>参考图片素材</label>
+            <select id="imgI2ISrc"></select>
+            <div class="grid2" style="margin-top:10px">
+              <div><label>重绘强度</label>
+                <input id="imgI2IStrength" type="number" value="0.6" min="0.05" max="1" step="0.05"></div>
+              <div><label>分辨率(MP)</label>
+                <select id="imgI2IMegapixels">
+                  <option value="0.2">0.2</option><option value="0.3">0.3</option>
+                  <option value="0.4" selected>0.4</option><option value="0.5">0.5</option>
+                  <option value="0.6">0.6</option><option value="0.8">0.8</option>
+                  <option value="1.0">1.0</option>
+                </select></div>
+            </div>
+            <div class="grid2" style="margin-top:10px">
+              <div><label>步数</label><input id="imgI2ISteps" type="number" value="8" min="1" max="50"></div>
+              <div class="fseed"><label>seed(空=随机)</label><input id="imgI2ISeed" type="number" placeholder="随机"></div>
+            </div>
+          </div>
+          <div class="fcol">
+            <label>提示词</label>
+            <textarea id="imgI2IPrompt" placeholder="描述想要得到的结果 ..."></textarea>
+          </div>
+        </div>
+      </div>
       <div class="headacts">
         <button class="primary" id="imgSubmitBtn" onclick="submitImage()">提交</button>
         <button class="ghost" onclick="resetImageForm()">重置</button>
@@ -2230,9 +2283,10 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     </div>
     <div class="card" id="imgCard" style="display:none">
       <details class="sec" open>
-        <summary onclick="toggleSec(event)"><span class="setoggle">图片素材列表</span></summary>
+        <summary onclick="toggleSec(event)"><span class="setoggle">创作图片列表</span></summary>
         <div class="muted" id="imgStatus" style="margin-bottom:8px"></div>
         <div id="imgList"></div>
+        <div id="imgJobs" class="muted">暂无生成记录</div>
       </details>
     </div>
     <div class="statgrid">
@@ -2435,7 +2489,7 @@ const MAT_EXT_KIND={png:'image',jpg:'image',jpeg:'image',webp:'image',bmp:'image
   mp3:'audio',wav:'audio',m4a:'audio',aac:'audio',flac:'audio',ogg:'audio'};
 const STATUS_CN = {queued:'排队中', running:'进行中', done:'已完成', failed:'失败', cancelled:'已取消', interrupted:'已中断'};
 const MEDIA_CN = {ref_image:'图', ref_video:'视频', ref_audio:'音频'};
-const MODE_CN = {t2v:'文生视频', ref2v:'参考生视频', edit:'剪辑成片', t2i:'文生图'};
+const MODE_CN = {t2v:'文生视频', ref2v:'参考生视频', edit:'剪辑成片', t2i:'文生图', i2i:'图生图'};
 const GEN_CN = {t2i:'文生图', i2i:'图生图'};
 const TRANS_CN = {cut:'硬切', fade:'黑场渐隐', dissolve:'交叉溶解', push:'推进/滑动'};
 const EDIT_ASPECTS = [['0','原始画幅'],['2.39','2.39:1 宽银幕'],['16:9','16:9 横屏'],
@@ -2493,7 +2547,7 @@ function renderProjHead(){
   $('projHead').innerHTML='<div class="cardhead"><h2 style="color:var(--fg);font-size:16px">'+esc(p.name)+'</h2>'+
     '<span class="bcbar">'+bcbar+'</span></div>'+
     '<div class="projsub"><span class="muted">'+esc(sub)+'</span>'+
-      (creator?'<button class="ghost" onclick="addImageMaterial()">添加图片素材</button>'
+      (creator?'<button class="ghost" onclick="addImageMaterial()">创作图片素材</button>'
               :'<button class="ghost" onclick="addShot()">添加分镜</button>')+'</div>';
 }
 function openProject(pid){ location.hash='#/p/'+encodeURIComponent(pid); }
@@ -2984,7 +3038,24 @@ function onImgModeChange(){
   const m=$('imgMode').value;
   $('imgT2I').style.display=(m==='t2i')?'':'none';
   $('imgI2I').style.display=(m==='i2i')?'':'none';
-  $('imgSubmitBtn').disabled=(m!=='t2i');
+  $('imgSubmitBtn').disabled=false;
+  if(m==='i2i') renderImgI2ISrc();
+}
+function renderImgI2ISrc(){
+  const sel=$('imgI2ISrc'); if(!sel) return;
+  const cur=sel.value;
+  const list=materials.filter(m=>m.kind==='image' && m.exists);
+  sel.innerHTML='';
+  if(!list.length){
+    const o=document.createElement('option'); o.value='';
+    o.textContent='（没有可用的图片素材）'; sel.appendChild(o); return;
+  }
+  list.forEach(m=>{
+    const o=document.createElement('option'); o.value=m.id;
+    o.textContent=(m.name||m.id)+' · '+(GEN_CN[m.gen]||'图片');
+    sel.appendChild(o);
+  });
+  if(cur && list.some(m=>m.id===cur)) sel.value=cur;
 }
 function openImageCreator(){
   if(!curProject){ notice('请先进入一个项目'); return; }
@@ -2995,7 +3066,9 @@ function openImageCreator(){
   $('imgStatus').textContent='';
   imgName=null;
   $('imgList')._sig=null;
+  $('imgJobs')._sig=null;
   renderImageList();
+  refreshImageJobs();
   renderProjHead();
   setTimeout(()=>{ $('imgCard').scrollIntoView({block:'start',behavior:'smooth'}); },30);
 }
@@ -3008,7 +3081,7 @@ function closeImageCreator(){
 }
 function addImageMaterial(){
   if(!curProject){ notice('请先进入一个项目'); return; }
-  openShotModal('添加图片素材','','确定',(name)=>{ imgName=name; showImgForm(); },'image');
+  openShotModal('创作图片素材','','确定',(name)=>{ imgName=name; showImgForm(); },'image');
 }
 function showImgForm(){
   $('imgTaskCard').style.display='';
@@ -3025,6 +3098,8 @@ async function resetImageForm(){
 function clearImageForm(){
   $('imgPrompt').value=''; $('imgSeed').value='';
   $('imgSteps').value=8; $('imgMegapixels').value='0.4'; $('imgAspect').value=ASPECTS[0];
+  $('imgI2IPrompt').value=''; $('imgI2ISeed').value='';
+  $('imgI2ISteps').value=8; $('imgI2IMegapixels').value='0.4'; $('imgI2IStrength').value=0.6;
   $('imgMode').value='t2i'; onImgModeChange();
   $('imgStatus').textContent='';
 }
@@ -3039,7 +3114,7 @@ function renderImageList(){
   const sig=list.map(m=>[m.id,m.name,m.gen,m.exists?1:0].join(',')).join('\n');
   if(box._sig===sig) return;
   box._sig=sig; box.innerHTML='';
-  if(!list.length){ box.innerHTML='<div class="matempty">还没有生成的图片素材，用上面的文生图生成。</div>'; return; }
+  if(!list.length){ box.innerHTML='<div class="matempty">还没有生成的图片素材，用上面的文生图 / 图生图生成。</div>'; return; }
   const pid=curProject;
   list.forEach(m=>{
     const nm=matSaveName(m), gen=GEN_CN[m.gen]||m.gen||'生成';
@@ -3061,6 +3136,66 @@ function renderImageList(){
     box.appendChild(d);
   });
 }
+async function refreshImageJobs(){
+  const box=$('imgJobs'); if(!box || !curProject || $('imgCard').style.display==='none') return;
+  const r=await api('/api/jobs?project='+encodeURIComponent(curProject)); if(!r) return;
+  const jobs=(r.jobs||[]).filter(j=>j.mode==='t2i'||j.mode==='i2i').slice(0,50);
+  const sig=jobs.map(j=>[j.id,j.name||'',j.status,(j.stage&&j.stage.label)||'',
+    (j.progress&&j.progress.cur)||'',(j.progress&&j.progress.total)||'',
+    j.duration!=null?j.duration:'',j.material_id||'',j.err||'',j.mode||''].join(',')).join('\n');
+  if(box._sig===sig){ updateUsedElapsed(); return; }
+  box._sig=sig;
+  if(!jobs.length){ box.innerHTML='<span class="muted">暂无生成记录</span>'; return; }
+  box.innerHTML='';
+  jobs.forEach(j=>{
+    jobsById[j.id]=j;
+    const d=document.createElement('div'); d.className='job';
+    const p=j.params||{};
+    const info=[MODE_CN[j.mode]||'', p.megapixels?p.megapixels+'MP':'',
+      (j.mode==='i2i'&&p.strength!=null)?('强度 '+p.strength):'', p.steps?p.steps+' 步':''].filter(Boolean).join(' · ');
+    const used=(j.duration!=null)? j.duration : (j.created_ts? Math.max(0, Date.now()/1000-j.created_ts) : null);
+    const usedTxt=(used!=null)? (j.duration!=null? '用时 '+fmtDur(used)
+                                 : '<span data-used="'+j.created_ts+'">用时 '+fmtDur(used)+'</span>') : '';
+    const line2=[info, usedTxt].filter(Boolean).join(' · ');
+    const note=j.status==='failed'? '<span style="color:var(--err)">'+friendlyErr(j.err)+'</span>'
+             : (j.stage&&j.status==='running'? j.stage.label : '');
+    let acts='<button class="ghost" onclick="showJob(\''+j.id+'\')">详情</button> ';
+    if(j.status==='queued'||j.status==='running') acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'cancel\')">取消</button>';
+    else acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'delete\')">删除</button>';
+    if(j.status==='cancelled'||j.status==='failed'||j.status==='interrupted')
+      acts+=' <button class="ghost" onclick="retryJob(\''+j.id+'\')">重新生成</button>';
+    if(j.material_id) acts+=' <button class="ghost" onclick="detailMaterial(\''+j.material_id+'\')">查看</button>';
+    let thumb='';
+    const mt=j.material_id? materials.find(m=>m.id===j.material_id) : null;
+    if(mt && mt.exists){
+      const nm=matSaveName(mt);
+      thumb='<span class="jthumbwrap"><img class="jthumb" loading="lazy" title="'+esc(nm)+'" src="'+thumbUrl(curProject,mt.file,mt.thumb_v,nm)+'">'+
+        '<a class="thumbdl" href="'+esc(matUrl(curProject,mt.file,nm))+'" download="'+esc(nm)+
+        '" title="单击查看大图（右键另存为原图）" onclick="event.preventDefault();viewMaterial(\''+j.material_id+'\')"></a></span>';
+    }else if(j.image_rel && j.status==='done'){
+      const nm=withExt(j.name||j.id,'.png'), u='/files/'+encodeURI(j.image_rel);
+      thumb='<span class="jthumbwrap"><img class="jthumb" loading="lazy" title="'+esc(nm)+'" src="'+u+'">'+
+        '<a class="thumbdl" href="'+u+'" download="'+esc(nm)+'" data-thumb="'+esc(u)+
+        '" title="单击查看大图（右键另存为原图）"></a></span>';
+    }else if(j.status==='running'||j.status==='queued'){
+      const pct=(j.status==='running'&&j.progress&&j.progress.total)
+        ? Math.round(j.progress.cur/j.progress.total*100) : 0;
+      thumb='<div class="jthumb ph" title="'+(STATUS_CN[j.status]||j.status)+'"><i style="width:'+pct+'%"></i></div>';
+    }else{
+      thumb='<div class="jthumb ph static" title="'+(STATUS_CN[j.status]||j.status)+'"></div>';
+    }
+    const head=j.name? '<b>'+esc(j.name)+'</b><br><b>'+esc(j.id)+'</b>' : '<b>'+esc(j.id)+'</b>';
+    d.innerHTML=thumb+'<span class="meta">'+head+'<br>'+line2+'<br>'+(note||j.created||'')+
+      '<br><span class="'+stCls(j.status)+'">'+(STATUS_CN[j.status]||j.status)+'</span></span>'+
+      '<span class="jobsacts">'+acts+'</span>';
+    const ov=d.querySelector('.thumbdl[data-thumb]');
+    if(ov){
+      const u=ov.getAttribute('data-thumb');
+      ov.addEventListener('click',(e)=>{ e.preventDefault(); openViewer('image', j.name||j.id, {src:u, orig:u}); });
+    }
+    box.appendChild(d);
+  });
+}
 function detailMaterial(mid){
   const m=matById(mid); if(!m) return;
   const row=(k,v)=>'<div class="detrow"><span class="muted">'+k+'</span><span>'+v+'</span></div>';
@@ -3071,6 +3206,8 @@ function detailMaterial(mid){
   h+=row('大小', fmtSize(m.size));
   h+=row('生成时间', esc(m.ts||'-'));
   if(m.aspect) h+=row('画幅', esc(m.aspect));
+  if(m.gen==='i2i' && m.init_name) h+=row('参考图片', esc(m.init_name));
+  if(m.gen==='i2i' && m.strength!=null) h+=row('重绘强度', m.strength);
   if(m.megapixels!=null) h+=row('分辨率', m.megapixels+' MP');
   if(m.steps!=null) h+=row('步数', m.steps);
   if(m.seed!=null) h+=row('seed', String(m.seed));
@@ -3091,31 +3228,57 @@ function reuseMaterial(mid){
   openShotModal('复用图片素材', suggestName(m.name), '确定', (name)=>{ imgName=name; showImgForm(); prefillImageForm(m); },'image');
 }
 function prefillImageForm(m){
-  $('imgMode').value='t2i'; onImgModeChange();
-  $('imgPrompt').value=m.prompt||'';
-  if(m.aspect) $('imgAspect').value=m.aspect;
-  if(m.megapixels!=null) $('imgMegapixels').value=m.megapixels;
-  if(m.steps!=null) $('imgSteps').value=m.steps;
-  $('imgSeed').value='';
+  const mode=(m.gen==='i2i')?'i2i':'t2i';
+  $('imgMode').value=mode; onImgModeChange();
+  if(mode==='i2i'){
+    renderImgI2ISrc();
+    if(m.init_material_id) $('imgI2ISrc').value=m.init_material_id;
+    $('imgI2IPrompt').value=m.prompt||'';
+    if(m.megapixels!=null) $('imgI2IMegapixels').value=m.megapixels;
+    if(m.steps!=null) $('imgI2ISteps').value=m.steps;
+    if(m.strength!=null) $('imgI2IStrength').value=m.strength;
+    $('imgI2ISeed').value='';
+  }else{
+    $('imgPrompt').value=m.prompt||'';
+    if(m.aspect) $('imgAspect').value=m.aspect;
+    if(m.megapixels!=null) $('imgMegapixels').value=m.megapixels;
+    if(m.steps!=null) $('imgSteps').value=m.steps;
+    $('imgSeed').value='';
+  }
 }
 async function submitImage(){
   if(!curProject){ notice('请先进入一个项目'); return; }
-  if(!imgName){ notice('请先添加图片素材并填写素材名'); return; }
-  if($('imgMode').value!=='t2i'){ notice('图生图开发中，敬请期待'); return; }
-  const prompt=$('imgPrompt').value.trim();
-  if(!prompt){ notice('请填写提示词'); return; }
-  const body={project:curProject, name:imgName, prompt:prompt, aspect:$('imgAspect').value,
-    megapixels:$('imgMegapixels').value, steps:$('imgSteps').value};
-  if($('imgSeed').value) body.seed=$('imgSeed').value;
+  if(!imgName){ notice('请先创作图片素材并填写素材名'); return; }
+  const mode=($('imgMode').value==='i2i')?'i2i':'t2i';
+  const body={project:curProject, name:imgName, mode};
+  if(mode==='i2i'){
+    const init=$('imgI2ISrc').value;
+    const prompt=$('imgI2IPrompt').value.trim();
+    if(!init){ notice('请选择参考图片素材'); return; }
+    if(!prompt){ notice('请填写提示词'); return; }
+    body.prompt=prompt; body.init=init;
+    body.strength=$('imgI2IStrength').value; body.megapixels=$('imgI2IMegapixels').value;
+    body.steps=$('imgI2ISteps').value;
+    if($('imgI2ISeed').value) body.seed=$('imgI2ISeed').value;
+  }else{
+    const prompt=$('imgPrompt').value.trim();
+    if(!prompt){ notice('请填写提示词'); return; }
+    body.prompt=prompt; body.aspect=$('imgAspect').value;
+    body.megapixels=$('imgMegapixels').value; body.steps=$('imgSteps').value;
+    if($('imgSeed').value) body.seed=$('imgSeed').value;
+  }
   $('imgSubmitBtn').disabled=true; $('imgStatus').textContent='提交中…';
   try{
     const r=await fetch('/api/images',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(body)});
     const j=await r.json().catch(()=>({}));
     if(r.status!==202){ $('imgStatus').textContent='提交失败：'+(j.error||r.status); $('imgSubmitBtn').disabled=false; return; }
-    imgJobId=j.id; $('imgPrompt').value=''; $('imgSeed').value='';
+    imgJobId=j.id;
+    if(mode==='i2i'){ $('imgI2IPrompt').value=''; $('imgI2ISeed').value=''; }
+    else{ $('imgPrompt').value=''; $('imgSeed').value=''; }
     $('imgTaskCard').style.display='none'; imgName=null;
     $('imgStatus').textContent='已提交：'+j.id+'（排队中…）';
+    refreshImageJobs();
   }catch(e){ $('imgStatus').textContent='网络错误'; }
   $('imgSubmitBtn').disabled=false;
 }
@@ -3123,6 +3286,7 @@ async function imgTick(){
   const card=$('imgCard');
   if(!card || card.style.display==='none') return;
   await refreshMaterials();
+  await refreshImageJobs();
   if(!imgJobId) return;
   const j=await api('/api/jobs/'+encodeURIComponent(imgJobId));
   if(!j) return;
@@ -3465,7 +3629,7 @@ async function refreshJobs(){
   if(!curProject) return;
   const r=await api('/api/jobs?project='+encodeURIComponent(curProject)); if(!r) return;
   const box=$('jobs');
-  const jobs=r.jobs.filter(j=>j.mode!=='edit' && j.mode!=='t2i').slice(0,50);
+  const jobs=r.jobs.filter(j=>j.mode!=='edit' && j.mode!=='t2i' && j.mode!=='i2i').slice(0,50);
   const sig=jobs.map(j=>[j.id,j.name||'',j.status,(j.stage&&j.stage.label)||'',
     (j.progress&&j.progress.cur)||'',(j.progress&&j.progress.total)||'',
     j.duration!=null?j.duration:'',j.clip_rel||'',j.err||'',j.mode||''].join(',')).join('\n');
