@@ -2841,6 +2841,10 @@ function showJob(id){
   h+=row('分辨率', p.megapixels!=null? p.megapixels+' MP':'-');
   if(j.status==='failed' && j.err) h+=row('错误', '<span style="color:var(--err)">'+esc(friendlyErr(j.err))+'</span>');
   h+='<div style="margin-top:12px"><div class="muted">提示词</div><div class="detprompt">'+esc(p.prompt||'')+'</div></div>';
+  if(j.mode==='i2i' && m.init_image){
+    h+='<div class="matgroups" style="margin-top:14px"><div class="matgroup"><div class="matgrouphead">参考图片</div><div class="matgrid">'+
+      mediaCard(detailMedia(m.init_image, id, j.project, 'image'))+'</div></div></div>';
+  }
   h+=mediaSection(id,m,j.project);
   $('jBody').innerHTML=h;
   bindMediaCards($('jBody'));
@@ -3117,6 +3121,8 @@ function renderImgI2ISrc(){
   if(!m || m.kind!=='image'){ inp.value=''; return; }
   const li=document.createElement('li'); li.className='slotcard';
   li.innerHTML=matPreview(m,curProject,false)+'<div class="nm" title="'+esc(m.name)+'">'+esc(m.name)+'</div>';
+  const thumb=li.firstElementChild;
+  if(thumb){ thumb.style.cursor='pointer'; thumb.onclick=()=>viewMaterial(m.id); }
   const acts=document.createElement('div'); acts.className='acts';
   const rm=document.createElement('button'); rm.className='rm'; rm.textContent='移除';
   rm.onclick=()=>{ inp.value=''; renderImgI2ISrc(); };
