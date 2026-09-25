@@ -1211,6 +1211,9 @@ textarea{min-height:96px;resize:vertical}
 button.primary{width:100%;margin-top:14px;padding:12px;border:0;border-radius:9px;background:var(--acc);
        color:#fff;font-size:15px;font-weight:600;cursor:pointer}
 button.primary:disabled{opacity:.5;cursor:default}
+.submitrow{display:flex;gap:10px;margin-top:14px}
+.submitrow button{flex:1 1 0;margin:0;height:44px;display:flex;align-items:center;justify-content:center}
+.submitrow button.primary{width:auto;padding:0}
 button.ghost{background:#20242d;color:var(--fg);border:1px solid var(--line);border-radius:8px;
        padding:6px 10px;font-size:13px;cursor:pointer}
 .progress{height:6px;background:#20242d;border-radius:3px;overflow:hidden;margin-top:8px;display:none}
@@ -1351,7 +1354,10 @@ details.sec>summary .editbtn{margin-left:auto}
       </div>
       <div id="refImageSizeRow"><label>参考图缩放</label>
         <select id="ref_image_size"><option value="match">match(快)</option><option value="max">max(保真)</option></select></div>
-      <button class="primary" id="submitBtn" onclick="submit()">提交任务</button>
+      <div class="submitrow">
+        <button class="primary" id="submitBtn" onclick="submit()">提交</button>
+        <button class="ghost" onclick="resetForm()">重置</button>
+      </div>
       <div class="progress" id="prog"><i></i></div>
       <div class="muted" id="submitMsg" style="margin-top:8px"></div>
     </div>
@@ -1790,11 +1796,28 @@ function onModeChange(){
     : '提示词（可选：上传首帧/尾帧；都不传即纯文生视频）';
 }
 
-function submit(){
+async function submit(){
   if(!curProject){ alert('请先进入一个项目'); goHome(); return; }
   const mode=$('mode').value;
   const prompt=$('prompt').value.trim();
   if(!prompt){ alert('请填写提示词'); return; }
+  const dur=$('dur').value, steps=$('steps').value;
+  let media='';
+  if(mode==='ref2v'){
+    const imgs=getImg(), vids=getVid(), auds=getAud();
+    if(!imgs.length && !vids.length && !auds.length){ alert('请至少上传一个参考素材'); return; }
+    media=[imgs.length?imgs.length+'图':null, vids.length?vids.length+'视频':null,
+           auds.length?auds.length+'音频':null].filter(Boolean).join(' / ');
+  }else{
+    const ff=getFirst(), lf=getLast();
+    media=[ff?'首帧':null, lf?'尾帧':null].filter(Boolean).join(' + ');
+  }
+  const ok=await askConfirm(
+    '项目：'+esc(projName(curProject))+'<br>类型：'+(MODE_CN[mode]||mode)+
+    '<br>时长：'+dur+'s · 步数：'+steps+(media?'<br>素材：'+media:'')+
+    '<br>提示词：'+esc(prompt.slice(0,100))+(prompt.length>100?'…':''),
+    '提交任务','提交');
+  if(!ok) return;
   const fd=new FormData();
   fd.append('project', curProject);
   fd.append('mode', mode);
@@ -1805,7 +1828,6 @@ function submit(){
   if($('seed').value) fd.append('seed', $('seed').value);
   if(mode==='ref2v'){
     const imgs=getImg(), vids=getVid(), auds=getAud();
-    if(!imgs.length && !vids.length && !auds.length){ alert('请至少上传一个参考素材'); return; }
     imgs.forEach(f=>fd.append('ref_image', f));
     vids.forEach(f=>fd.append('ref_video', f));
     auds.forEach(f=>fd.append('ref_audio', f));
@@ -1829,6 +1851,17 @@ function submit(){
   };
   xhr.onerror=()=>{ $('submitBtn').disabled=false; alert('网络错误'); };
   xhr.send(fd);
+}
+
+async function resetForm(){
+  const ok=await askConfirm('清空当前填写的内容并恢复默认参数？','重置','清空');
+  if(!ok) return;
+  $('mode').value='t2v'; onModeChange();
+  $('prompt').value='';
+  $('dur').value=5; $('steps').value=8; $('seed').value='';
+  $('aspect').value=ASPECTS[0]; $('megapixels').value='0.4'; $('ref_image_size').value='match';
+  getImg.set([]); getVid.set([]); getAud.set([]); getFirst.set(null); getLast.set(null);
+  $('prog').style.display='none'; $('submitMsg').textContent='';
 }
 
 async function api(path){ const r=await fetch(path); return r.ok? r.json(): null; }
