@@ -2013,7 +2013,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .projcard .meta2{font-size:12px;color:var(--mut)}
 .bcbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .projsub{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.matcardhead{font-size:14px;color:var(--mut);font-weight:600;margin-bottom:10px}
+.matcardhead{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--mut);font-weight:600;margin-bottom:10px}
 .matgrouphead .ghostbtns{display:inline-flex;gap:6px;flex:0 0 auto}
 .matgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-top:12px;align-items:start}
 .matgroups{display:flex;flex-direction:column;gap:16px;margin-top:12px}
@@ -2291,7 +2291,8 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     </div>
     <div class="statgrid">
       <div class="card" id="matCard">
-        <div class="matcardhead">素材库 <span class="muted" id="matSub"></span></div>
+        <div class="matcardhead"><span>素材库 <span class="muted" id="matSub"></span></span>
+          <button class="ghost" style="margin-left:auto;padding:3px 10px;font-size:12.5px" onclick="openImageCreator()">创作图片素材</button></div>
         <input id="matAddFile" type="file" style="display:none" onchange="onMatAddPick()">
         <div class="muted" id="matMsg" style="margin-top:6px"></div>
         <div id="matGrid" class="matgroups"></div>
@@ -2983,9 +2984,6 @@ function renderMaterials(){
       const hd=document.createElement('summary'); hd.className='matgrouphead';
       hd.setAttribute('onclick','toggleSec(event)');
       let btns='<button class="ghost" onclick="event.preventDefault();event.stopPropagation();matAddOpen(\''+kind+'\')">添加</button>';
-      if(kind==='image'){
-        btns='<button class="ghost" onclick="event.preventDefault();event.stopPropagation();openImageCreator()">创作图片素材</button>'+btns;
-      }
       hd.innerHTML='<span class="setoggle">'+label+' ('+list.length+')</span>'+
         '<span class="ghostbtns">'+btns+'</span>';
       sec.appendChild(hd);
