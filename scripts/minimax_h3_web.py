@@ -1917,14 +1917,19 @@ main{padding:14px;max-width:1400px;margin:0 auto}
 .cardhead.modehead h2{white-space:nowrap}
 .cardhead select{width:auto;padding:6px 10px;font-size:13px}
 label{display:block;font-size:13px;color:var(--mut);margin:10px 0 4px}
+.prompthead{display:flex;align-items:center;gap:8px;margin:10px 0 4px}
+.prompthead label{margin:0;flex:1}
+.prompthead button{flex:none}
 textarea,input,select{width:100%;background:#0e1116;border:1px solid var(--line);color:var(--fg);
        border-radius:8px;padding:9px 10px;font-size:15px}
 textarea{min-height:96px;resize:vertical}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
-.filebox{border:1px dashed var(--line);border-radius:8px;padding:8px;margin-top:4px}
+.filebox{display:flex;flex-wrap:wrap;align-items:center;gap:8px;border:1px dashed var(--line);border-radius:8px;padding:8px;margin-top:4px}
+.filebox label{margin:0}
 .filebox .hint{font-size:12px;color:var(--mut)}
-.filebox ul{list-style:none;margin:6px 0 0;padding:0;font-size:12px;color:var(--fg)}
+.filebox ul{list-style:none;margin:0;padding:0;font-size:12px;color:var(--fg);flex:1 1 100%}
+.filebox ul:empty{display:none}
 .filebox li{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:3px 0;border-bottom:1px dotted var(--line)}
 .filebox li .fname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .filebox li .acts{display:flex;gap:6px;flex:0 0 auto}
@@ -2083,6 +2088,8 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
   .formgrid>.fcol{min-width:0}
   .formgrid>.fcol:first-child{order:2}
   .formgrid>.fcol:last-child{order:1}
+  #taskCard>.formgrid>.fcol:first-child{order:1}
+  #taskCard>.formgrid>.fcol:last-child{order:2;padding-top:43px}
   .formgrid textarea{min-height:214px}
   .params{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:4px}
   .params>.grid3,.params>.grid2{display:contents}
@@ -2154,37 +2161,39 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
       <div class="muted" id="submitMsg" style="margin-top:8px"></div>
       <div class="formgrid">
         <div class="fcol">
-          <label id="promptLabel"></label>
+          <div class="prompthead">
+            <label id="promptLabel"></label>
+            <button class="ghost" id="optBtn" onclick="optimizePrompt()">优化</button>
+          </div>
           <textarea id="prompt" placeholder="Cinematic shot of the subject ..."></textarea>
-          <div style="margin-top:6px"><button class="ghost" id="optBtn" onclick="optimizePrompt()">提示词优化</button></div>
         </div>
         <div class="fcol">
           <div id="t2vBox">
-            <label>首帧（可选，单张图片）</label>
             <div class="filebox">
+              <label>首帧（可选，单张图片）</label>
               <button type="button" class="ghost" onclick="openPick('first_frame')">选择素材</button>
               <ul id="lFirst"></ul>
             </div>
-            <label>尾帧（可选，单张图片）</label>
             <div class="filebox">
+              <label>尾帧（可选，单张图片）</label>
               <button type="button" class="ghost" onclick="openPick('last_frame')">选择素材</button>
               <ul id="lLast"></ul>
             </div>
           </div>
           <div id="ref2vBox">
-            <label>参考图（≤9）</label>
             <div class="filebox">
+              <label>参考图（≤9）</label>
               <button type="button" class="ghost" onclick="openPick('ref_image')">选择素材</button>
               <ul id="lImg"></ul>
             </div>
-            <label>参考视频（≤3，每段 2–15s，合计 ≤15s）</label>
             <div class="filebox">
+              <label>参考视频（≤3，每段 2–15s，合计 ≤15s）</label>
               <button type="button" class="ghost" onclick="openPick('ref_video')">选择素材</button>
-              <button type="button" class="ghost" style="margin-left:6px" onclick="openPick('ref_video','clip')">选择产物</button>
+              <button type="button" class="ghost" onclick="openPick('ref_video','clip')">选择产物</button>
               <ul id="lVid"></ul>
             </div>
-            <label>参考音频（≤3，合计 ≤15s）</label>
             <div class="filebox">
+              <label>参考音频（≤3，合计 ≤15s）</label>
               <button type="button" class="ghost" onclick="openPick('ref_audio')">选择素材</button>
               <ul id="lAud"></ul>
             </div>
@@ -3932,7 +3941,7 @@ async function releaseVram(){
 
 async function optimizePrompt(){
   const prompt=$('prompt').value.trim();
-  if(!prompt){ $('submitMsg').textContent='请先填写提示词'; return; }
+  if(!prompt){ notice('请先填写提示词'); return; }
   const counts = $('mode').value==='ref2v'
     ? {ref_image:selMat.ref_image.length,
        ref_video:selMat.ref_video.length+selClip.ref_video.length,
