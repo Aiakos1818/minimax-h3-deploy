@@ -1344,6 +1344,20 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
     </div>
   </div>
 </div>
+<div class="modal" id="delModal" onclick="if(event.target===this)closeDel()">
+  <div class="box" style="width:min(420px,96vw)">
+    <div class="optrow"><b>删除项目</b><button class="ghost" onclick="closeDel()">关闭</button></div>
+    <div class="muted" id="delMsg" style="margin-bottom:12px"></div>
+    <label style="display:flex;align-items:center;gap:8px;margin:0;color:var(--fg);font-size:14px">
+      <input id="delClips" type="checkbox" checked style="width:auto">同时删除产物
+    </label>
+    <div class="muted" id="delHint" style="margin-top:10px"></div>
+    <div class="optacts">
+      <button class="ghost" onclick="closeDel()">取消</button>
+      <button class="primary" onclick="confirmDeleteProject()">删除</button>
+    </div>
+  </div>
+</div>
 <script>
 const $ = (id)=>document.getElementById(id);
 const esc = (s)=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -1425,18 +1439,32 @@ async function renameProject(){
   if(!r.ok){ alert('改名失败：'+(j.error||j.msg||r.status)); return; }
   await refreshProjects();
 }
-async function deleteProject(){
+let delPid=null;
+function updDelHint(){
+  $('delHint').textContent = $('delClips').checked
+    ? '将同时删除该项目下的任务记录与视频文件，不可恢复。'
+    : '不删除产物：项目内任务将转为「默认项目」，视频文件保留。';
+}
+function deleteProject(){
   const p=projects.find(x=>x.id===curProject); if(!p) return;
-  const ans=prompt('删除项目「'+p.name+'」\n输入 1：删除项目及其任务与产物\n输入 2：仅删除项目，任务转默认项目',
-                   '2');
-  if(ans==null) return;
-  const mode=(ans.trim()==='1')?'purge':'detach';
-  const r=await fetch('/api/projects/'+encodeURIComponent(curProject)+'/delete',{method:'POST',
+  delPid=p.id;
+  $('delMsg').innerHTML='确定删除项目「<b>'+esc(p.name)+'</b>」？';
+  $('delClips').checked=true; updDelHint();
+  $('delModal').classList.add('open');
+}
+function closeDel(){ $('delModal').classList.remove('open'); delPid=null; }
+async function confirmDeleteProject(){
+  if(!delPid) return;
+  const mode=$('delClips').checked?'purge':'detach';
+  const pid=delPid;
+  const r=await fetch('/api/projects/'+encodeURIComponent(pid)+'/delete',{method:'POST',
     headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
   const j=await r.json().catch(()=>({}));
+  closeDel();
   if(!r.ok){ alert('删除失败：'+(j.error||j.msg||r.status)); return; }
   goHome(); await refreshProjects();
 }
+$('delClips').onchange=updDelHint;
 function friendlyErr(e){
   if(!e) return '';
   if(/runner exited rc=/.test(e)) return '生成进程异常退出';
