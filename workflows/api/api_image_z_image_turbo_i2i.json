@@ -1,9 +1,8 @@
 {
   "30": {
-    "class_type": "CLIPLoader",
+    "class_type": "ZImageCLIPLoader",
     "inputs": {
       "clip_name": "qwen_3_4b.safetensors",
-      "type": "lumina2",
       "device": "default"
     }
   },
