@@ -2274,6 +2274,10 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     <div class="card" id="imgTaskCard" style="display:none">
       <div class="cardhead modehead">
         <h2>新建图片素材</h2>
+        <select id="imgModel" title="生成模型">
+          <option value="zimage">Z-Image Turbo</option>
+          <option value="qwen">Qwen-Image-2.1</option>
+        </select>
         <select id="imgMode" onchange="onImgModeChange()">
           <option value="t2i">文生图</option>
           <option value="i2i">图生图</option>
@@ -3187,7 +3191,7 @@ function clearImageForm(){
   $('imgI2IPrompt').value=''; $('imgI2ISeed').value='';
   $('imgI2ISteps').value=8; $('imgI2IMegapixels').value='0.4'; $('imgI2IStrength').value=0.6;
   $('imgI2ISrc').value=''; renderImgI2ISrc();
-  $('imgMode').value='t2i'; onImgModeChange();
+  $('imgMode').value='t2i'; $('imgModel').value='zimage'; onImgModeChange();
   $('imgStatus').textContent='';
 }
 function cancelImageMaterial(){
@@ -3285,6 +3289,7 @@ function reuseMaterial(mid){
 function prefillImageForm(m){
   const mode=(m.gen==='i2i')?'i2i':'t2i';
   $('imgMode').value=mode; onImgModeChange();
+  $('imgModel').value=m.model||'zimage';
   if(mode==='i2i'){
     $('imgI2ISrc').value=m.init_material_id||'';
     renderImgI2ISrc();
@@ -3305,7 +3310,9 @@ async function submitImage(){
   if(!curProject){ notice('请先进入一个项目'); return; }
   if(!imgName){ notice('请先创作图片并填写素材名'); return; }
   const mode=($('imgMode').value==='i2i')?'i2i':'t2i';
-  const body={project:curProject, name:imgName, mode};
+  const model=$('imgModel').value||'zimage';
+  if(model==='qwen'){ notice('Qwen-Image-2.1 尚未接入后端，请先选 Z-Image Turbo'); return; }
+  const body={project:curProject, name:imgName, mode, model};
   if(mode==='i2i'){
     const init=$('imgI2ISrc').value;
     const prompt=$('imgI2IPrompt').value.trim();
