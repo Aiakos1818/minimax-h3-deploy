@@ -1926,17 +1926,26 @@ textarea{min-height:96px;resize:vertical}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
 .filebox{display:flex;flex-wrap:wrap;align-items:center;gap:8px;border:1px dashed var(--line);border-radius:8px;padding:8px;margin-top:4px}
-.filebox label{margin:0}
+.filebox label{margin:0;flex:1 1 0;min-width:0}
+.filebox .fbact{display:flex;gap:8px;flex:0 0 auto;margin-left:auto}
 .filebox .hint{font-size:12px;color:var(--mut)}
-.filebox ul{list-style:none;margin:0;padding:0;font-size:12px;color:var(--fg);flex:1 1 100%}
+.filebox ul{list-style:none;margin:0;padding:0;flex:1 1 100%}
 .filebox ul:empty{display:none}
-.filebox li{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:3px 0;border-bottom:1px dotted var(--line)}
-.filebox li .fname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.filebox li .acts{display:flex;gap:6px;flex:0 0 auto}
-.filebox li button.rm{background:none;border:0;color:var(--err);cursor:pointer;font-size:12px}
-.filebox li button.chip{background:#22324d;color:#bcd4ff;border:1px solid #33507d;border-radius:999px;
-       padding:1px 9px;font-size:12px;cursor:pointer}
-.filebox li button.chip:active{background:#2f4a6e}
+.slotgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:8px}
+.slotcard{background:#0e1116;border:1px solid var(--line);border-radius:8px;overflow:hidden;
+        display:flex;flex-direction:column;min-width:0}
+.slotcard .thumb,.slotcard .thumbwrap{width:100%;aspect-ratio:16/9;background:#0a0c11;display:block}
+.slotcard img.thumb{object-fit:contain}
+.slotcard video.thumb{object-fit:cover}
+.slotcard .thumbwrap img.thumb{width:100%;height:100%;object-fit:contain;display:block}
+.slotcard .thumbicon{width:100%;aspect-ratio:16/9;background:#0a0c11;display:flex;align-items:center;
+        justify-content:center;color:var(--mut);font-size:12px}
+.slotcard .nm{font-size:11.5px;color:var(--fg);padding:4px 6px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.slotcard .acts{display:flex;gap:4px;padding:4px 6px 6px;margin-top:auto}
+.slotcard .acts button{flex:1;min-width:0;cursor:pointer;font-size:11px;padding:3px 4px;border-radius:6px}
+.slotcard .acts button.chip{background:#22324d;color:#bcd4ff;border:1px solid #33507d;border-radius:999px}
+.slotcard .acts button.chip:active{background:#2f4a6e}
+.slotcard .acts button.rm{background:#20242d;border:1px solid var(--line);color:var(--err)}
 button.primary{width:100%;margin-top:14px;padding:12px;border:0;border-radius:9px;background:var(--acc);
        color:#fff;font-size:15px;font-weight:600;cursor:pointer}
 button.primary:disabled{opacity:.5;cursor:default}
@@ -2171,31 +2180,30 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
           <div id="t2vBox">
             <div class="filebox">
               <label>首帧（可选，单张图片）</label>
-              <button type="button" class="ghost" onclick="openPick('first_frame')">选择素材</button>
-              <ul id="lFirst"></ul>
+              <div class="fbact"><button type="button" class="ghost" onclick="openPick('first_frame')">选择素材</button></div>
+              <ul id="lFirst" class="slotgrid"></ul>
             </div>
             <div class="filebox">
               <label>尾帧（可选，单张图片）</label>
-              <button type="button" class="ghost" onclick="openPick('last_frame')">选择素材</button>
-              <ul id="lLast"></ul>
+              <div class="fbact"><button type="button" class="ghost" onclick="openPick('last_frame')">选择素材</button></div>
+              <ul id="lLast" class="slotgrid"></ul>
             </div>
           </div>
           <div id="ref2vBox">
             <div class="filebox">
               <label>参考图（≤9）</label>
-              <button type="button" class="ghost" onclick="openPick('ref_image')">选择素材</button>
-              <ul id="lImg"></ul>
+              <div class="fbact"><button type="button" class="ghost" onclick="openPick('ref_image')">选择素材</button></div>
+              <ul id="lImg" class="slotgrid"></ul>
             </div>
             <div class="filebox">
               <label>参考视频（≤3，每段 2–15s，合计 ≤15s）</label>
-              <button type="button" class="ghost" onclick="openPick('ref_video')">选择素材</button>
-              <button type="button" class="ghost" onclick="openPick('ref_video','clip')">选择产物</button>
-              <ul id="lVid"></ul>
+              <div class="fbact"><button type="button" class="ghost" onclick="openPick('ref_video','clip')">选择产物</button><button type="button" class="ghost" onclick="openPick('ref_video')">选择素材</button></div>
+              <ul id="lVid" class="slotgrid"></ul>
             </div>
             <div class="filebox">
               <label>参考音频（≤3，合计 ≤15s）</label>
-              <button type="button" class="ghost" onclick="openPick('ref_audio')">选择素材</button>
-              <ul id="lAud"></ul>
+              <div class="fbact"><button type="button" class="ghost" onclick="openPick('ref_audio')">选择素材</button></div>
+              <ul id="lAud" class="slotgrid"></ul>
             </div>
           </div>
         </div>
@@ -2955,9 +2963,18 @@ function renderSlot(kind){
   const items=slotItems(kind);
   list.innerHTML='';
   items.forEach((it,i)=>{
-    const li=document.createElement('li');
-    const nm=document.createElement('span'); nm.className='fname'; nm.textContent=it.name;
-    const acts=document.createElement('span'); acts.className='acts';
+    const li=document.createElement('li'); li.className='slotcard';
+    let pv='';
+    if(it.src==='mat'){
+      const m=matById(it.id); if(m) pv=matPreview(m,curProject,false);
+    }else{
+      const c=clipsCache.find(x=>x.rel===it.rel);
+      if(c) pv='<video class="thumb" muted playsinline preload="none" poster="/vthumb/'+encodeURI(c.rel)+
+             '" src="/files/'+encodeURI(c.rel)+'"></video>';
+    }
+    if(!pv) pv='<div class="thumbicon">'+MAT_KIND_CN[SLOT_MEDIA[kind]]+'</div>';
+    li.innerHTML=pv+'<div class="nm" title="'+esc(it.name)+'">'+esc(it.name)+'</div>';
+    const acts=document.createElement('div'); acts.className='acts';
     if(cfg.prefix){
       const chip=document.createElement('button'); chip.className='chip'; chip.textContent=cfg.prefix+(i+1);
       chip.title='插入引用 <'+cfg.prefix+' '+(i+1)+'>';
@@ -2967,7 +2984,7 @@ function renderSlot(kind){
     const rm=document.createElement('button'); rm.className='rm'; rm.textContent='移除';
     rm.onclick=()=>setSlotSelection(kind, items.filter(x=>itemKey(x)!==itemKey(it)));
     acts.appendChild(rm);
-    li.appendChild(nm); li.appendChild(acts); list.appendChild(li);
+    li.appendChild(acts); list.appendChild(li);
   });
 }
 function renderAllSlots(){ for(const k in selMat) renderSlot(k); }
