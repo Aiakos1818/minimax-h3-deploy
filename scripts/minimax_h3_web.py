@@ -12,7 +12,7 @@ Usage:
   ~/ComfyUI-Deploy/comfyenv/bin/python scripts/minimax_h3_web.py --start|--stop|--status
 Default: http://0.0.0.0:8191/   data: <root>/.h3ref2v/   log: <root>/minimax_h3_web.log
 """
-import argparse, base64, glob, html, json, mimetypes, os, random, re, shutil, signal
+import argparse, base64, glob, json, mimetypes, os, random, re, shutil, signal
 import subprocess, sys, threading, time, uuid, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote, quote
@@ -1222,103 +1222,17 @@ class Manager:
             job["st"]["progress"] = {"cur": prog[0], "total": prog[1]}
 
 
-# ------------------------------------------------------- help (doc + videos)
-HELP_DOC_NAME = "minimax_h3_web.md"
-HELP_VIDEO_TITLES = {
-    "videoA-t2v.mp4": "文生视频 + 提示词优化",
-    "videoB-edit.mp4": "剪辑成片（时间线）",
-}
-
-
-def help_doc_path(root):
-    return os.path.join(root, "docs", HELP_DOC_NAME)
-
-
-def help_media_dirs(root):
-    """Videos ship next to the docs; fall back to the demo download dir."""
-    return [os.path.join(root, "docs", "media"),
-            os.path.join(os.path.expanduser("~"), "Downloads", "minimax-h3-demo")]
-
-
-def help_videos(root):
-    seen, out = set(), []
-    for d in help_media_dirs(root):
-        try:
-            names = sorted(os.listdir(d))
-        except OSError:
-            continue
-        for fn in names:
-            if fn.lower().endswith((".mp4", ".webm")) and fn not in seen:
-                seen.add(fn)
-                out.append({"name": fn,
-                            "title": HELP_VIDEO_TITLES.get(fn, os.path.splitext(fn)[0])})
-    return out
-
-
-def _md_inline(s):
-    s = html.escape(s, quote=False)
-    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
-    s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
-    s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)",
-               r'<a href="\2" target="_blank" rel="noopener">\1</a>', s)
-    return s
-
-
-def md_to_html(text):
-    """Tiny markdown subset -> HTML (headings, lists, tables, code, quotes)."""
-    lines, out, i, n = text.split("\n"), [], 0, len(text.split("\n"))
-    while i < n:
-        line = lines[i]
-        if line.lstrip().startswith("```"):
-            i += 1
-            buf = []
-            while i < n and not lines[i].lstrip().startswith("```"):
-                buf.append(html.escape(lines[i])); i += 1
-            i += 1
-            out.append("<pre><code>" + "\n".join(buf) + "</code></pre>")
-            continue
-        if re.match(r"^\s*\|.*\|\s*$", line) and i + 1 < n \
-                and re.match(r"^\s*\|[\s:|-]+\|\s*$", lines[i + 1]):
-            head = [c.strip() for c in line.strip().strip("|").split("|")]
-            i += 2
-            rows = []
-            while i < n and re.match(r"^\s*\|.*\|\s*$", lines[i]):
-                rows.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
-                i += 1
-            h = "".join("<th>%s</th>" % _md_inline(c) for c in head)
-            body = "".join("<tr>%s</tr>" % "".join("<td>%s</td>" % _md_inline(c) for c in r)
-                           for r in rows)
-            out.append("<table><thead><tr>%s</tr></thead><tbody>%s</tbody></table>" % (h, body))
-            continue
-        m = re.match(r"^(#{1,6})\s+(.*)$", line)
-        if m:
-            lv = len(m.group(1))
-            out.append("<h%d>%s</h%d>" % (lv, _md_inline(m.group(2)), lv)); i += 1; continue
-        if re.match(r"^\s*([-*_])\s*\1\s*\1", line):
-            out.append("<hr>"); i += 1; continue
-        if re.match(r"^\s*[-*]\s+", line):
-            buf = []
-            while i < n and re.match(r"^\s*[-*]\s+", lines[i]):
-                buf.append("<li>%s</li>" % _md_inline(re.sub(r"^\s*[-*]\s+", "", lines[i]))); i += 1
-            out.append("<ul>%s</ul>" % "".join(buf)); continue
-        if re.match(r"^\s*\d+\.\s+", line):
-            buf = []
-            while i < n and re.match(r"^\s*\d+\.\s+", lines[i]):
-                buf.append("<li>%s</li>" % _md_inline(re.sub(r"^\s*\d+\.\s+", "", lines[i]))); i += 1
-            out.append("<ol>%s</ol>" % "".join(buf)); continue
-        if line.strip().startswith(">"):
-            buf = []
-            while i < n and lines[i].strip().startswith(">"):
-                buf.append(_md_inline(lines[i].strip()[1:].strip())); i += 1
-            out.append("<blockquote>%s</blockquote>" % "<br>".join(buf)); continue
-        if not line.strip():
-            i += 1; continue
-        out.append("<p>%s</p>" % _md_inline(line)); i += 1
-    return "\n".join(out)
-
 
 # ------------------------------------------------------------------- handler
 _OUTPUT_RE = re.compile(r"^/files/(.+)$")
+
+
+def _tracked_path(rest):
+    """Split `pid/file[/display-name]` -> (pid, file); the trailing display name
+    is only there so the browser suggests it when saving the file."""
+    pid, _, tail = rest.partition("/")
+    fn = tail.split("/", 1)[0]
+    return pid, unquote(fn)
 
 
 def make_handler(mgr):
@@ -1421,31 +1335,6 @@ def make_handler(mgr):
                 self._err(404, "file not found"); return
             self._send_file_range(cand, force_dl)
 
-        def _serve_help_doc(self):
-            try:
-                with open(help_doc_path(mgr.root), encoding="utf-8") as f:
-                    md = f.read()
-            except OSError:
-                self._err(404, "help doc not found"); return
-            body = md_to_html(md).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(body)
-
-        def _serve_help_video(self, name):
-            name = unquote(name)
-            if not name or name != os.path.basename(name) or "/" in name or "\\" in name:
-                self._err(400, "bad name"); return
-            for d in help_media_dirs(mgr.root):
-                p = os.path.join(d, name)
-                if os.path.isfile(p):
-                    self._send_file_range(p); return
-            self._err(404, "video not found")
-
         def do_GET(self):
             if not self._authed():
                 return
@@ -1458,13 +1347,6 @@ def make_handler(mgr):
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(body)
-            elif u.path == "/api/help":
-                self._json(200, {"doc": os.path.isfile(help_doc_path(mgr.root)),
-                                 "videos": help_videos(mgr.root)})
-            elif u.path == "/help/doc":
-                self._serve_help_doc()
-            elif u.path.startswith("/help/video/"):
-                self._serve_help_video(u.path[len("/help/video/"):])
             elif u.path == "/api/state":
                 self._json(200, mgr.state())
             elif u.path == "/api/projects":
@@ -1520,16 +1402,14 @@ def make_handler(mgr):
                     self._err(404, "file not found"); return
                 self._send_file_range(cand)
             elif u.path.startswith("/thumb/"):
-                rest = u.path[len("/thumb/"):]
-                pid, _, fn = rest.partition("/")
-                cand = mgr.material_thumb(pid, unquote(fn)) if fn else None
+                pid, fn = _tracked_path(u.path[len("/thumb/"):])
+                cand = mgr.material_thumb(pid, fn) if fn else None
                 if not cand:
                     self._err(404, "not found"); return
                 self._send_file_range(cand, cache=True)
             elif u.path.startswith("/preview/"):
-                rest = u.path[len("/preview/"):]
-                pid, _, fn = rest.partition("/")
-                cand = mgr.material_thumb(pid, unquote(fn), PREVIEW_MAX) if fn else None
+                pid, fn = _tracked_path(u.path[len("/preview/"):])
+                cand = mgr.material_thumb(pid, fn, PREVIEW_MAX) if fn else None
                 if not cand:
                     self._err(404, "not found"); return
                 self._send_file_range(cand, cache=True)
@@ -1539,9 +1419,8 @@ def make_handler(mgr):
                     self._err(404, "not found"); return
                 self._send_file_range(cand)
             elif u.path.startswith("/material/"):
-                rest = u.path[len("/material/"):]
-                pid, _, fn = rest.partition("/")
-                cand = mgr.material_file(pid, unquote(fn)) if fn else None
+                pid, fn = _tracked_path(u.path[len("/material/"):])
+                cand = mgr.material_file(pid, fn) if fn else None
                 if not cand:
                     self._err(404, "not found"); return
                 self._send_file_range(cand)
@@ -1971,10 +1850,14 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .matcard.sel{outline:3px solid var(--acc);outline-offset:-3px}
 .matcard .thumb{grid-area:thumb;width:100%;aspect-ratio:16/9;background:#000;object-fit:cover;display:block}
 .matcard img.thumb{object-fit:contain;background:#0a0c11;cursor:zoom-in}
+.matcard .thumbwrap{grid-area:thumb;position:relative;width:100%;aspect-ratio:16/9;background:#0a0c11}
+.matcard .thumbwrap img.thumb{width:100%;height:100%;aspect-ratio:auto;object-fit:contain;display:block}
+.matcard .thumbdl{position:absolute;inset:0;cursor:zoom-in}
 .matcard.pick img.thumb{cursor:pointer}
 .matcard video.thumb{cursor:pointer}
-.matcard .thumbicon{grid-area:thumb;width:100%;aspect-ratio:16/9;background:#0a0c11;display:flex;align-items:center;
-        justify-content:center;color:var(--mut);font-size:12px;letter-spacing:.05em;cursor:pointer}
+.matcard .thumbicon{grid-area:thumb;width:100%;aspect-ratio:16/9;background:#0a0c11;display:flex;flex-direction:column;
+        align-items:center;justify-content:center;gap:4px;color:var(--mut);font-size:12px;letter-spacing:.05em;cursor:pointer}
+.matcard .thumbicon audio[controls]{width:100%;padding:0 8px;box-sizing:border-box}
 .viewbody img{display:block;margin:0 auto;max-width:100%;max-height:82vh;border-radius:8px}
 .viewbody video{display:block;width:100%;max-height:82vh;background:#000;border-radius:8px}
 .viewbody audio{width:100%}
@@ -2046,24 +1929,6 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   #taskCard>.headacts{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
   .jobsacts{flex-basis:100%}
 }
-.docbody{color:var(--fg);font-size:14px;line-height:1.68}
-.docbody h1{font-size:22px;margin:4px 0 12px}
-.docbody h2{font-size:18px;margin:20px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--line)}
-.docbody h3{font-size:15px;margin:14px 0 6px}
-.docbody p{margin:8px 0}
-.docbody ul,.docbody ol{margin:8px 0 8px 22px}
-.docbody li{margin:3px 0}
-.docbody code{background:#0a0c11;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12.5px}
-.docbody pre{background:#0a0c11;border:1px solid var(--line);border-radius:8px;padding:10px 12px;overflow:auto}
-.docbody pre code{border:0;padding:0;background:none}
-.docbody table{border-collapse:collapse;width:100%;margin:10px 0;font-size:13px}
-.docbody th,.docbody td{border:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}
-.docbody th{background:rgba(255,255,255,.04)}
-.docbody a{color:#6ea8ff}
-.docbody blockquote{margin:10px 0;padding:2px 12px;border-left:3px solid var(--line);color:var(--mut)}
-.docbody hr{border:0;border-top:1px solid var(--line);margin:16px 0}
-.hvlist{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px}
-#hvideo{width:100%;max-height:70vh;background:#000;border-radius:8px}
 </style>
 </head>
 <body>
@@ -2079,13 +1944,6 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 </header>
 <main>
   <div id="homeView">
-    <div class="card" id="helpCard">
-      <div class="cardhead"><h2>使用帮助</h2><span class="muted" id="helpSub">加载中…</span></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="ghost" onclick="openHelpVideo()">用法视频</button>
-        <button class="ghost" onclick="openHelpDoc()">用法文档</button>
-      </div>
-    </div>
     <div class="card">
       <div class="cardhead"><h2>新建项目</h2></div>
       <div style="display:flex;gap:8px">
@@ -2344,20 +2202,6 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
     <pre class="log" id="log" style="height:60vh;max-height:60vh"></pre>
   </div>
 </div>
-<div class="modal" id="docModal" onclick="if(event.target===this)closeDoc()">
-  <div class="box" style="width:min(980px,98vw);max-height:88vh;overflow:auto">
-    <div class="optrow"><b>MiniMax H3 使用说明</b><button class="ghost" onclick="closeDoc()">关闭</button></div>
-    <div id="docBody" class="docbody"></div>
-  </div>
-</div>
-<div class="modal" id="helpModal" onclick="if(event.target===this)closeHelp()">
-  <div class="box" style="width:min(1040px,98vw)">
-    <div class="optrow"><b>用法视频</b><button class="ghost" onclick="closeHelp()">关闭</button></div>
-    <div class="hvlist" id="hvList"></div>
-    <video id="hvideo" controls playsinline webkit-playsinline></video>
-    <div class="muted" id="hvMsg" style="margin-top:8px"></div>
-  </div>
-</div>
 <script>
 const $ = (id)=>document.getElementById(id);
 const esc = (s)=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -2404,7 +2248,8 @@ async function refreshProjects(){
     projects.forEach(p=>{
       const d=document.createElement('div'); d.className='projcard'; d.onclick=()=>openProject(p.id);
       const cover=(p.cover && p.cover.slice(-4)==='.mp4')
-        ? '<img class="cover" loading="lazy" src="/vthumb/'+encodeURI(p.cover)+'">'
+        ? '<video class="cover" muted playsinline preload="none" title="'+esc(withExt(String(p.cover).split('/').pop().replace(/\.[^.]+$/,''), fileExt(p.cover)))+
+          '" poster="/vthumb/'+encodeURI(p.cover)+'" src="/files/'+encodeURI(p.cover)+'"></video>'
         : '<div class="ph">暂无产物</div>';
       d.innerHTML=cover+'<div class="body"><div class="nm">'+esc(p.name)+'</div>'+
         '<div class="meta2">'+projSub(p)+'</div></div>';
@@ -2562,8 +2407,12 @@ function showTaskCard(){
   $('submitMsg').textContent='';
   setTimeout(()=>{ $('taskCard').scrollIntoView({block:'start',behavior:'smooth'}); },30);
 }
-function matUrl(pid,file){ return '/material/'+encodeURIComponent(pid)+'/'+encodeURIComponent(String(file).split('/').pop()); }
-function thumbUrl(pid,file,v){ return '/thumb/'+encodeURIComponent(pid)+'/'+encodeURIComponent(String(file).split('/').pop())+(v?'?v='+v:''); }
+function fileExt(f){ const s=String(f), i=s.lastIndexOf('.'); return i>0? s.slice(i):''; }
+function withExt(name, ext){ const s=String(name||''); return (ext && s.toLowerCase().endsWith(String(ext).toLowerCase()))? s : s+ext; }
+function matSaveName(m){ return withExt(m.name, fileExt(m.file)); }
+function tailName(name){ return name? '/'+encodeURIComponent(name) : ''; }
+function matUrl(pid,file,name){ return '/material/'+encodeURIComponent(pid)+'/'+encodeURIComponent(String(file).split('/').pop())+tailName(name); }
+function thumbUrl(pid,file,v,name){ return '/thumb/'+encodeURIComponent(pid)+'/'+encodeURIComponent(String(file).split('/').pop())+tailName(name)+(v?'?v='+v:''); }
 function mediaUrl(jid,pid,p){
   p=String(p);
   if(pid && p.indexOf('/materials/')>=0) return matUrl(pid,p);
@@ -2585,7 +2434,7 @@ function mediaSection(jid,m,pid){
         let src=u;
         if(pid && String(p).indexOf('/materials/')>=0){
           const mt=matByFile(String(p).split('/').pop());
-          if(mt && mt.exists) src=previewUrl(pid,mt.file,mt.thumb_v);
+          if(mt && mt.exists) src=previewUrl(pid,mt.file,mt.thumb_v,matSaveName(mt));
         }
         h+='<img src="'+src+'" loading="lazy">';
       }
@@ -2787,9 +2636,12 @@ function renderSlot(kind){
   });
 }
 function renderAllSlots(){ for(const k in selMat) renderSlot(k); }
-function matPreview(m,pid){
-  if(m.kind==='image') return '<img class="thumb" loading="lazy" src="'+thumbUrl(pid,m.file,m.thumb_v)+'">';
-  if(m.kind==='video') return '<video class="thumb" muted playsinline preload="none" poster="'+thumbUrl(pid,m.file,m.thumb_v)+'"></video>';
+function matPreview(m,pid,live){
+  const nm=matSaveName(m);
+  if(m.kind==='image') return '<img class="thumb" loading="lazy" src="'+thumbUrl(pid,m.file,m.thumb_v,nm)+'">';
+  const u=matUrl(pid,m.file,nm);
+  if(m.kind==='video') return '<video class="thumb" muted playsinline preload="none" title="'+esc(nm)+'" poster="'+thumbUrl(pid,m.file,m.thumb_v)+'" src="'+u+'"></video>';
+  if(live) return '<div class="thumbicon"><audio controls preload="none" title="'+esc(nm)+'" src="'+u+'"></audio></div>';
   return '<div class="thumbicon">'+MAT_KIND_CN[m.kind]+'</div>';
 }
 function renderMaterials(){
@@ -2807,12 +2659,23 @@ function renderMaterials(){
       const g=document.createElement('div'); g.className='matgrid';
       list.forEach(m=>{
         const d=document.createElement('div'); d.className='matcard';
-        d.innerHTML=matPreview(m,pid)+'<div class="mb"><div class="nm" title="'+esc(m.name)+'">'+esc(m.name)+'</div>'+
+        const nm=matSaveName(m);
+        let pv=matPreview(m,pid,true);
+        if(m.kind==='image' && m.exists){
+          // show the cached thumbnail but let right-click save the original file
+          pv='<div class="thumbwrap"><img class="thumb" loading="lazy" src="'+thumbUrl(pid,m.file,m.thumb_v,nm)+'">'+
+             '<a class="thumbdl" href="'+matUrl(pid,m.file,nm)+'" download="'+esc(nm)+
+             '" title="双击查看大图（右键另存为原图）" onclick="event.preventDefault()"></a></div>';
+        }
+        d.innerHTML=pv+'<div class="mb"><div class="nm" title="'+esc(m.name)+'">'+esc(m.name)+'</div>'+
           '<div class="mm">'+MAT_KIND_CN[m.kind]+' · '+fmtSize(m.size)+(m.exists?'':' · 文件缺失')+'</div></div>';
         if(m.exists){
-          const prev=d.firstElementChild;
-          if(m.kind==='image'){ prev.title='双击查看大图'; prev.addEventListener('dblclick',()=>viewMaterial(m.id)); }
-          else{ prev.title=(m.kind==='video'?'单击放大播放':'单击播放'); prev.addEventListener('click',()=>viewMaterial(m.id)); }
+          if(m.kind==='image'){
+            const ov=d.querySelector('.thumbdl');
+            if(ov) ov.addEventListener('dblclick',()=>viewMaterial(m.id));
+          }else if(m.kind==='video'){
+            d.firstElementChild.addEventListener('click',()=>viewMaterial(m.id));
+          }
         }
         const ma=document.createElement('div'); ma.className='ma';
         const rm=document.createElement('button'); rm.textContent='删除'; rm.onclick=()=>deleteMaterial(m.id);
@@ -2919,7 +2782,8 @@ function renderPickGrid(){
       d.onclick=()=>togglePick(c.rel);
       d.innerHTML=(c.shot?'<div class="shotname" title="'+esc(c.shot)+'">'+esc(c.shot)+'</div>':'')+
         '<div class="picktag">'+(on?'✓':'')+'</div>'+
-        '<img class="thumb" loading="lazy" src="/vthumb/'+encodeURI(c.rel)+'">'+
+        '<video class="thumb" muted playsinline preload="none" title="'+esc(withExt(c.shot||String(c.name).replace(/\.[^.]+$/,''), fileExt(c.name)))+
+          '" poster="/vthumb/'+encodeURI(c.rel)+'" src="/files/'+encodeURI(c.rel)+'"></video>'+
         '<div class="mb"><div class="nm" title="'+esc(c.name)+'">'+esc(c.name)+'</div>'+
         '<div class="mm">产物 · '+fmtSize(c.size)+' · '+c.ts+'</div></div>';
       box.appendChild(d);
@@ -3148,8 +3012,9 @@ async function refreshJobs(){
     acts+=' <button class="ghost" onclick="reuseJob(\''+j.id+'\')">复用</button>';
     let thumb='';
     if(j.clip_rel){
-      thumb='<img class="jthumb" loading="lazy" src="/vthumb/'+encodeURI(j.clip_rel)+
-        '" onclick="window.play(\''+j.clip_rel+'\')" title="点击播放">';
+      thumb='<video class="jthumb" muted playsinline preload="none" title="'+esc(withExt(j.name||j.id, fileExt(j.clip_rel)))+'" poster="/vthumb/'+encodeURI(j.clip_rel)+
+        '" src="/files/'+encodeURI(j.clip_rel)+
+        '" onclick="window.play(\''+j.clip_rel+'\')"></video>';
     }else if(j.status==='running'||j.status==='queued'){
       const pct=(j.status==='running'&&j.progress&&j.progress.total)
         ? Math.round(j.progress.cur/j.progress.total*100) : 0;
@@ -3232,7 +3097,8 @@ function renderTimeline(){
     }
     h+='<div class="tslot" data-i="'+i+'">'+junc+
       '<div class="trow"><span class="thandle" onpointerdown="dragStart(event,'+i+')" title="拖动排序">\u2261</span>'+
-      '<img class="thumb" loading="lazy" src="/vthumb/'+encodeURI(c.rel)+'">'+
+      '<video class="thumb" muted playsinline preload="none" title="'+esc(withExt((clipsCache.find(x=>x.rel===c.rel)||{}).shot||String(c.rel).split('/').pop().replace(/\.[^.]+$/,''), fileExt(c.rel)))+
+        '" poster="/vthumb/'+encodeURI(c.rel)+'" src="/files/'+encodeURI(c.rel)+'"></video>'+
       '<div class="tmeta"><b>'+esc(clipLabel(c.rel))+'</b>第 '+(i+1)+' 段 · '+esc(TRANS_CN[t.type]||t.type)+(t.type==='cut'?'':' '+t.dur+'s')+'</div>'+
       '<div class="tacts2">'+
         '<button onclick="moveClip('+i+',-1)" title="上移">\u25B2</button>'+
@@ -3248,7 +3114,8 @@ function renderPickClips(){
   box.innerHTML='';
   editAvail.forEach(c=>{
     const d=document.createElement('div'); d.className='clip'; d.onclick=()=>addClip(c.rel);
-    d.innerHTML='<span class="addclip">+</span><img loading="lazy" src="/vthumb/'+encodeURI(c.rel)+'">'+
+    d.innerHTML='<span class="addclip">+</span><video muted playsinline preload="none" title="'+esc(withExt(c.shot||String(c.name).replace(/\.[^.]+$/,''), fileExt(c.name)))+
+      '" poster="/vthumb/'+encodeURI(c.rel)+'" src="/files/'+encodeURI(c.rel)+'"></video>'+
       '<div class="cap">'+c.name.slice(0,20)+'<br>'+fmtSize(c.size)+'</div>';
     box.appendChild(d);
   });
@@ -3334,7 +3201,8 @@ async function refreshEditJobs(){
         const cap=(j.clip_seconds?j.clip_seconds+'s · ':'')+(STATUS_CN[j.status]||j.status)+' · '+(j.created||'');
         if(j.clip_rel){
           d.onclick=()=>play(j.clip_rel);
-          d.innerHTML='<img loading="lazy" src="/vthumb/'+encodeURI(j.clip_rel)+'">'+
+          d.innerHTML='<video muted playsinline preload="none" title="'+esc(withExt(String(j.clip_rel).split('/').pop().replace(/\.[^.]+$/,''), fileExt(j.clip_rel)))+
+            '" poster="/vthumb/'+encodeURI(j.clip_rel)+'" src="/files/'+encodeURI(j.clip_rel)+'"></video>'+
             '<div class="cap">'+esc(j.id)+'<br>'+esc(cap)+'</div>'+
             '<button class="addclip" style="right:auto;left:6px;background:var(--err)" onclick="event.stopPropagation();delEdit(\''+j.id+'\')">删除</button>';
         }else{
@@ -3374,20 +3242,20 @@ function play(rel){ $('mvideo').src='/files/'+encodeURI(rel); $('mcap').textCont
   $('modal').classList.add('open'); $('mvideo').play().catch(()=>{}); }
 function closeModal(){ $('mvideo').pause(); $('mvideo').src=''; $('modal').classList.remove('open'); }
 
-function previewUrl(pid,file,v){ return '/preview/'+encodeURIComponent(pid)+'/'+encodeURIComponent(String(file).split('/').pop())+(v?'?v='+v:''); }
+function previewUrl(pid,file,v,name){ return '/preview/'+encodeURIComponent(pid)+'/'+encodeURIComponent(String(file).split('/').pop())+tailName(name)+(v?'?v='+v:''); }
 function viewMaterial(mid){
   const m=matById(mid); if(!m) return;
   if(!m.exists){ notice('素材文件缺失：'+m.name); return; }
-  const u=matUrl(curProject,m.file), pid=curProject;
+  const nm=matSaveName(m), u=matUrl(curProject,m.file,nm), pid=curProject;
   $('viewOrig').style.display = m.kind==='image' ? '' : 'none';
   let h;
   if(m.kind==='image'){
     // show the cached thumbnail at once, then swap in the downscaled preview
-    h='<img src="'+thumbUrl(pid,m.file,m.thumb_v)+'" data-preview="'+previewUrl(pid,m.file,m.thumb_v)+'" data-orig="'+u+'">';
+    h='<img src="'+thumbUrl(pid,m.file,m.thumb_v,nm)+'" data-preview="'+previewUrl(pid,m.file,m.thumb_v,nm)+'" data-orig="'+u+'">';
   }else if(m.kind==='video'){
-    h='<video controls autoplay playsinline src="'+u+'"></video>';
+    h='<video controls autoplay playsinline title="'+esc(nm)+'" src="'+u+'"></video>';
   }else{
-    h='<audio controls autoplay src="'+u+'"></audio>';
+    h='<audio controls autoplay title="'+esc(nm)+'" src="'+u+'"></audio>';
   }
   $('viewCap').textContent=m.name+' · '+MAT_KIND_CN[m.kind];
   $('viewBody').innerHTML=h;
@@ -3414,45 +3282,6 @@ async function releaseVram(){
   if(!ok) return;
   fetch('/api/service/stop',{method:'POST'}).then(async r=>{ const j=await r.json(); notice(j.msg||'ok'); refreshState(); }); }
 
-// ---- help (usage doc + videos) ----
-async function refreshHelp(){
-  const j=await api('/api/help'); if(!j) return;
-  const n=(j.videos||[]).length, parts=[];
-  if(n) parts.push(n+' 段操作视频');
-  if(j.doc) parts.push('图文使用说明');
-  $('helpSub').textContent = parts.length? ('含 '+parts.join(' + ')) : '暂无可用帮助内容';
-}
-async function openHelpDoc(){
-  $('docBody').innerHTML='<span class="muted">加载中…</span>';
-  $('docModal').classList.add('open');
-  try{
-    const r=await fetch('/help/doc');
-    if(!r.ok) throw 0;
-    $('docBody').innerHTML=await r.text();
-  }catch(e){ $('docBody').innerHTML='<span class="muted">文档加载失败</span>'; }
-}
-function closeDoc(){ $('docModal').classList.remove('open'); }
-async function openHelpVideo(){
-  const j=await api('/api/help'); const vids=(j&&j.videos)||[];
-  if(!vids.length){ notice('未找到用法视频文件'); return; }
-  const box=$('hvList'); box.innerHTML='';
-  vids.forEach(v=>{ const b=document.createElement('button'); b.className='ghost';
-    b.textContent=v.title; b.onclick=()=>playHelp(v,b); box.appendChild(b); });
-  $('helpModal').classList.add('open');
-  playHelp(vids[0], box.firstChild);
-}
-function playHelp(v,btn){
-  [...$('hvList').children].forEach(b=>b.className=(b===btn?'primary':'ghost'));
-  $('hvMsg').textContent=v.title+'  ·  '+v.name;
-  const vid=$('hvideo');
-  vid.src='/help/video/'+encodeURIComponent(v.name);
-  vid.play().catch(()=>{});
-}
-function closeHelp(){
-  const vid=$('hvideo'); vid.pause();
-  vid.removeAttribute('src'); if(vid.load) vid.load();
-  $('helpModal').classList.remove('open');
-}
 async function optimizePrompt(){
   const prompt=$('prompt').value.trim();
   if(!prompt){ $('submitMsg').textContent='请先填写提示词'; return; }
@@ -3489,7 +3318,7 @@ function fallbackCopy(){
 function applyOpt(){ const t=$('optText').value; if(!t) return; $('prompt').value=t; closeOpt(); }
 
 onModeChange();
-(async()=>{ await refreshProjects(); refreshHelp(); route(); })();
+(async()=>{ await refreshProjects(); route(); })();
 refreshState();
 setInterval(refreshState,2000); setInterval(refreshProjects,5000);
 setInterval(refreshJobs,5000); setInterval(refreshOutputs,5000); setInterval(pollLog,1500);
