@@ -10,7 +10,9 @@ raylightenv/
 vendor/
 .h3web/
 .h3web_v3/
+.h3ref2v/
 .v3_service.json
+.ref2v_service.json
 .clip_offload_test/
 refsteps.wav
 workflows/.index.json
