@@ -2158,6 +2158,9 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
   .params .fseed{order:5}
   .cardhead.modehead{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   .cardhead.modehead #mode{width:100%;min-width:0}
+  #imgTaskCard>.cardhead.modehead{display:flex;flex-wrap:nowrap;gap:8px}
+  #imgTaskCard>.cardhead.modehead>h2{min-width:0;overflow:hidden;text-overflow:ellipsis}
+  #imgTaskCard>.cardhead.modehead>select{width:auto;min-width:0;flex:0 0 auto}
   .formgrid>.fcol:last-child{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
   #imgT2I>.formgrid>.fcol:first-child,#imgI2I>.formgrid>.fcol:first-child{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
   #imgT2I>.formgrid>.fcol:last-child,#imgI2I>.formgrid>.fcol:last-child{border-top:0;margin-top:0;padding-top:0}
