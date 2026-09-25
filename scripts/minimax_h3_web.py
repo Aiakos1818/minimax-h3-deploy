@@ -2288,7 +2288,9 @@ function route(){
     if(curProject!==pid){ curProject=pid;
       $('jobs')._sig=null; $('jobs').innerHTML='';
       jobsById={}; clipsCache=[]; lastJob=null; logOffset=0; $('log').textContent='';
-      clearSelMat(); materials=[]; $('matGrid').innerHTML=''; }
+      clearSelMat(); materials=[]; $('matGrid')._sig=null; $('matGrid').innerHTML='';
+      $('matCard').querySelector('details').open=false;
+      $('stJobs').querySelector('details').open=true; }
     $('homeView').style.display='none';
     $('projView').style.display=edit?'none':'';
     $('editView').style.display=edit?'':'none';
