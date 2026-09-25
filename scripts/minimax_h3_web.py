@@ -1629,6 +1629,35 @@ function closeJob(){
   $('jBody').querySelectorAll('video,audio').forEach(o=>o.pause());
   $('jobModal').classList.remove('open');
 }
+async function reuseJob(id){
+  const j=jobsById[id]; if(!j) return;
+  if(!curProject){ alert('请先进入一个项目'); return; }
+  const p=j.params||{}, m=j.media||{};
+  $('submitMsg').textContent='正在载入任务 '+id+' 的素材…';
+  $('mode').value=(j.mode==='ref2v')?'ref2v':'t2v'; onModeChange();
+  $('prompt').value=p.prompt||'';
+  if(p.dur!=null) $('dur').value=p.dur;
+  if(p.steps!=null) $('steps').value=p.steps;
+  if(p.aspect) $('aspect').value=p.aspect;
+  if(p.megapixels!=null) $('megapixels').value=p.megapixels;
+  if(p.ref_image_size) $('ref_image_size').value=p.ref_image_size;
+  $('seed').value='';   // 复用不沿用原 seed，留空=随机，避免复现成同样的视频
+  getImg.set([]); getVid.set([]); getAud.set([]); getFirst.set(null); getLast.set(null);
+  const load=async(kind,setter)=>{
+    const files=[];
+    for(const path of (m[kind]||[])){
+      try{
+        const b=await (await fetch(mediaUrl(id,path))).blob();
+        files.push(new File([b],String(path).split('/').pop(),{type:b.type||''}));
+      }catch(e){}
+    }
+    if(kind==='first_frame'||kind==='last_frame') setter.set(files[0]||null); else setter.set(files);
+  };
+  await load('ref_image',getImg); await load('ref_video',getVid); await load('ref_audio',getAud);
+  await load('first_frame',getFirst); await load('last_frame',getLast);
+  window.scrollTo({top:0,behavior:'smooth'});
+  $('submitMsg').textContent='已复用任务 '+id+'（未提交）';
+}
 function friendlyErr(e){
   if(!e) return '';
   if(/runner exited rc=/.test(e)) return '生成进程异常退出';
@@ -1724,7 +1753,9 @@ function bindFiles(inputId, listId, max, cn, prefix){
     input.value='';            // allow picking the same file again / keep appending
     render();
   };
-  return ()=>files;
+  const get=()=>files;
+  get.set=(arr)=>{ files=(arr||[]).slice(); render(); };
+  return get;
 }
 function bindOne(inputId, listId){
   const input=$(inputId), list=$(listId); let file=null;
@@ -1739,7 +1770,9 @@ function bindOne(inputId, listId){
     acts.appendChild(rm); li.appendChild(nm); li.appendChild(acts); list.appendChild(li);
   }
   input.onchange=()=>{ file=input.files[0]||null; input.value=''; render(); };
-  return ()=>file;
+  const get=()=>file;
+  get.set=(f)=>{ file=f||null; render(); };
+  return get;
 }
 const getImg = bindFiles('fImg','lImg',9,'图片','Picture');
 const getVid = bindFiles('fVid','lVid',3,'视频','Video');
@@ -1867,6 +1900,7 @@ async function refreshJobs(){
     if(j.status==='queued'||j.status==='running') acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'cancel\')">取消</button>';
     else acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'delete\')">删除</button>';
     if(j.clip_rel) acts+=' <button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看</button>';
+    acts+=' <button class="ghost" onclick="reuseJob(\''+j.id+'\')">复用</button>';
     d.innerHTML='<span class="'+stCls(j.status)+'">'+(STATUS_CN[j.status]||j.status)+'</span>'+
       '<span class="meta"><b>'+j.id+'</b><br>'+line2+'<br>'+(note||j.created||'')+'</span>'+acts;
     box.appendChild(d);
