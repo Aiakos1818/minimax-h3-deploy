@@ -748,7 +748,8 @@ class Manager:
                 "ended": st.get("ended"), "duration": st.get("duration"),
                 "stage": st.get("stage"), "progress": st.get("progress"),
                 "detail": st.get("detail"),
-                "err": st.get("err"), "seed": st.get("seed"),
+                "err": st.get("err"),
+                "seed": None if st.get("seed") is None else str(st.get("seed")),
                 "params": st.get("params"), "media": st.get("media"),
                 "clip_rel": st.get("clip_rel"), "clip_size": st.get("clip_size"),
                 "clip_frames": st.get("clip_frames"), "clip_seconds": st.get("clip_seconds"),
@@ -967,6 +968,17 @@ def make_handler(mgr):
             elif u.path == "/api/outputs":
                 proj = parse_qs(u.query).get("project", [None])[0] or None
                 self._json(200, mgr.clips_list(proj))
+            elif u.path.startswith("/media/"):
+                jid, _, fn = u.path[len("/media/"):].partition("/")
+                if not jid or not fn or jid not in mgr.jobs:
+                    self._err(404, "not found"); return
+                base = os.path.realpath(os.path.join(mgr._job_dir(jid), "uploads"))
+                cand = os.path.realpath(os.path.join(base, unquote(fn)))
+                if cand != base and not cand.startswith(base + os.sep):
+                    self._err(403, "bad path"); return
+                if not os.path.isfile(cand):
+                    self._err(404, "file not found"); return
+                self._send_file_range(cand)
             else:
                 m = _OUTPUT_RE.match(u.path)
                 if m:
@@ -1257,6 +1269,15 @@ details.sec>summary .editbtn{margin-left:auto}
 .projcard .nm{font-weight:600;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .projcard .meta2{font-size:12px;color:var(--mut)}
 .bcbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.mediagrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:6px}
+.mediagrid img,.mediagrid video{width:100%;aspect-ratio:16/9;object-fit:cover;background:#000;
+       border-radius:8px;border:1px solid var(--line)}
+.medialist{display:block;margin-top:6px}
+.medialist audio{width:100%;display:block;margin-top:6px}
+.detprompt{background:#0b0e13;border:1px solid var(--line);border-radius:8px;padding:8px;font-size:13px;
+       white-space:pre-wrap;word-break:break-word;max-height:200px;overflow:auto;line-height:1.55}
+.detrow{display:flex;gap:10px;font-size:13px;padding:2px 0}
+.detrow .muted{min-width:52px}
 @media(max-width:980px){.cols{grid-template-columns:1fr}}
 @media(max-width:640px){.grid3{grid-template-columns:1fr 1fr}textarea,input,select{font-size:16px}}
 </style>
@@ -1417,6 +1438,12 @@ details.sec>summary .editbtn{margin-left:auto}
     </div>
   </div>
 </div>
+<div class="modal" id="jobModal" onclick="if(event.target===this)closeJob()">
+  <div class="box" style="width:min(720px,96vw);max-height:88vh;overflow:auto">
+    <div class="optrow"><b id="jTitle">任务详情</b><button class="ghost" onclick="closeJob()">关闭</button></div>
+    <div id="jBody"></div>
+  </div>
+</div>
 <script>
 const $ = (id)=>document.getElementById(id);
 const esc = (s)=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -1554,6 +1581,54 @@ function askInput(title,value,okText,ph){
   });
 }
 function inputResolve(v){ $('inputModal').classList.remove('open'); const cb=inputCb; inputCb=null; if(cb) cb(v); }
+function mediaUrl(jid,p){ return '/media/'+encodeURIComponent(jid)+'/'+encodeURIComponent(String(p).split('/').pop()); }
+function mediaSection(jid,m){
+  const groups=[['ref_image','参考图','img'],['ref_video','参考视频','video'],
+                ['ref_audio','参考音频','audio'],['first_frame','首帧','img'],['last_frame','尾帧','img']];
+  let h='';
+  groups.forEach(([k,label,kind])=>{
+    const arr=m[k]||[]; if(!arr.length) return;
+    h+='<div style="margin-top:12px"><div class="muted">'+label+' ('+arr.length+')</div>'+
+       '<div class="'+(kind==='audio'?'medialist':'mediagrid')+'">';
+    arr.forEach(p=>{
+      const u=mediaUrl(jid,p);
+      if(kind==='img') h+='<img src="'+u+'" loading="lazy">';
+      else if(kind==='video') h+='<video controls preload="metadata" playsinline src="'+u+'"></video>';
+      else h+='<audio controls preload="metadata" src="'+u+'"></audio>';
+    });
+    h+='</div></div>';
+  });
+  return h;
+}
+function bindSinglePlay(root){
+  const els=root.querySelectorAll('video,audio');
+  els.forEach(el=>el.addEventListener('play',()=>{
+    els.forEach(o=>{ if(o!==el && !o.paused) o.pause(); });
+  }));
+}
+function showJob(id){
+  const j=jobsById[id]; if(!j) return;
+  const p=j.params||{}, m=j.media||{};
+  $('jTitle').textContent='任务详情 · '+id;
+  const row=(k,v)=>'<div class="detrow"><span class="muted">'+k+'</span><span>'+v+'</span></div>';
+  let h='';
+  h+=row('类型', MODE_CN[j.mode]||j.mode||'-');
+  h+=row('时长', p.dur!=null? p.dur+' 秒':'-');
+  h+=row('步数', p.steps!=null? p.steps:'-');
+  h+=row('seed', j.seed!=null? String(j.seed):'-');
+  h+=row('画幅', esc(p.aspect||'-'));
+  h+=row('分辨率', p.megapixels!=null? p.megapixels+' MP':'-');
+  if(j.status==='failed' && j.err) h+=row('错误', '<span style="color:var(--err)">'+esc(friendlyErr(j.err))+'</span>');
+  h+='<div style="margin-top:12px"><div class="muted">提示词</div><div class="detprompt">'+esc(p.prompt||'')+'</div></div>';
+  h+=mediaSection(id,m);
+  $('jBody').innerHTML=h;
+  bindSinglePlay($('jBody'));
+  $('jobModal').classList.add('open');
+}
+function closeJob(){
+  $('jBody').querySelectorAll('video,audio').forEach(o=>o.pause());
+  $('jobModal').classList.remove('open');
+}
 function friendlyErr(e){
   if(!e) return '';
   if(/runner exited rc=/.test(e)) return '生成进程异常退出';
@@ -1788,9 +1863,9 @@ async function refreshJobs(){
                                  : '<span data-used="'+j.created_ts+'">用时 '+fmtDur(used)+'</span>') : '';
     const line2 = [MODE_CN[j.mode]||'', info, usedTxt].filter(Boolean).join(' · ');
     const note = j.status==='failed'? '<span style="color:var(--err)">'+friendlyErr(j.err)+'</span>' : (j.stage&&j.status==='running'? j.stage.label : '');
-    let acts='';
-    if(j.status==='queued'||j.status==='running') acts='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'cancel\')">取消</button>';
-    else acts='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'delete\')">删除</button>';
+    let acts='<button class="ghost" onclick="showJob(\''+j.id+'\')">详情</button> ';
+    if(j.status==='queued'||j.status==='running') acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'cancel\')">取消</button>';
+    else acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'delete\')">删除</button>';
     if(j.clip_rel) acts+=' <button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看</button>';
     d.innerHTML='<span class="'+stCls(j.status)+'">'+(STATUS_CN[j.status]||j.status)+'</span>'+
       '<span class="meta"><b>'+j.id+'</b><br>'+line2+'<br>'+(note||j.created||'')+'</span>'+acts;
