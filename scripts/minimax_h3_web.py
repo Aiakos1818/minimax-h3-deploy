@@ -1614,6 +1614,20 @@ details.sec>summary .editbtn{margin-left:auto}
 .junc .start{color:var(--ok)}
 .addclip{position:absolute;top:6px;right:6px;background:var(--acc);color:#fff;border:0;border-radius:6px;
        padding:2px 8px;font-size:12px;cursor:pointer;z-index:1}
+.formgrid,.params,.statgrid{display:block}
+@media(min-width:981px){
+  .formgrid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:14px;align-items:start}
+  .formgrid>.fcol{min-width:0}
+  .formgrid textarea{min-height:214px}
+  .params{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:4px}
+  .params>.grid3,.params>.grid2{display:contents}
+  .refsize{max-width:320px}
+  .submitrow{max-width:420px}
+  .statgrid{display:grid;gap:14px;grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+            grid-template-areas:"cur clips" "jobs clips"}
+  .statgrid>.card{margin-bottom:0}
+  #stCur{grid-area:cur}#stJobs{grid-area:jobs}#stClips{grid-area:clips}
+}
 @media(max-width:980px){.cols{grid-template-columns:1fr}}
 @media(max-width:640px){.grid3{grid-template-columns:1fr 1fr}textarea,input,select{font-size:16px}}
 .docbody{color:var(--fg);font-size:14px;line-height:1.68}
@@ -1669,48 +1683,54 @@ details.sec>summary .editbtn{margin-left:auto}
   </div>
   <div id="projView" style="display:none">
     <div class="card" id="projHead"></div>
-    <div class="cols">
-      <div>
-        <div class="card">
-          <div class="cardhead">
-            <h2>新建任务</h2>
+    <div class="card">
+      <div class="cardhead">
+        <h2>新建任务</h2>
         <select id="mode" onchange="onModeChange()">
           <option value="t2v">文生视频</option>
           <option value="ref2v">参考生视频</option>
         </select>
       </div>
-      <label id="promptLabel"></label>
-      <textarea id="prompt" placeholder="Cinematic shot of the subject ..."></textarea>
-      <div style="margin-top:6px"><button class="ghost" id="optBtn" onclick="optimizePrompt()">提示词优化</button></div>
-      <div id="t2vBox">
-        <label>首帧（可选，单张图片）</label>
-        <div class="filebox"><input id="fFirst" type="file" accept="image/*"><ul id="lFirst"></ul></div>
-        <label>尾帧（可选，单张图片）</label>
-        <div class="filebox"><input id="fLast" type="file" accept="image/*"><ul id="lLast"></ul></div>
+      <div class="formgrid">
+        <div class="fcol">
+          <label id="promptLabel"></label>
+          <textarea id="prompt" placeholder="Cinematic shot of the subject ..."></textarea>
+          <div style="margin-top:6px"><button class="ghost" id="optBtn" onclick="optimizePrompt()">提示词优化</button></div>
+        </div>
+        <div class="fcol">
+          <div id="t2vBox">
+            <label>首帧（可选，单张图片）</label>
+            <div class="filebox"><input id="fFirst" type="file" accept="image/*"><ul id="lFirst"></ul></div>
+            <label>尾帧（可选，单张图片）</label>
+            <div class="filebox"><input id="fLast" type="file" accept="image/*"><ul id="lLast"></ul></div>
+          </div>
+          <div id="ref2vBox">
+            <label>参考图（≤9）</label>
+            <div class="filebox"><input id="fImg" type="file" accept="image/*" multiple><ul id="lImg"></ul></div>
+            <label>参考视频（≤3，每段 2–15s，合计 ≤15s）</label>
+            <div class="filebox"><input id="fVid" type="file" accept="video/*" multiple><ul id="lVid"></ul></div>
+            <label>参考音频（≤3，合计 ≤15s）</label>
+            <div class="filebox"><input id="fAud" type="file" accept="audio/*" multiple><ul id="lAud"></ul></div>
+          </div>
+        </div>
       </div>
-      <div id="ref2vBox">
-        <label>参考图（≤9）</label>
-        <div class="filebox"><input id="fImg" type="file" accept="image/*" multiple><ul id="lImg"></ul></div>
-        <label>参考视频（≤3，每段 2–15s，合计 ≤15s）</label>
-        <div class="filebox"><input id="fVid" type="file" accept="video/*" multiple><ul id="lVid"></ul></div>
-        <label>参考音频（≤3，合计 ≤15s）</label>
-        <div class="filebox"><input id="fAud" type="file" accept="audio/*" multiple><ul id="lAud"></ul></div>
+      <div class="params">
+        <div class="grid3">
+          <div><label>时长(秒)</label><input id="dur" type="number" value="5" min="1" max="15" step="0.5"></div>
+          <div><label>步数</label><input id="steps" type="number" value="8" min="1" max="50"></div>
+          <div><label>seed(空=随机)</label><input id="seed" type="number" placeholder="随机"></div>
+        </div>
+        <div class="grid2">
+          <div><label>画幅</label><select id="aspect"></select></div>
+          <div><label>分辨率(MP)</label>
+            <select id="megapixels">
+              <option value="0.2">0.2</option><option value="0.3">0.3</option>
+              <option value="0.4" selected>0.4</option><option value="0.5">0.5</option>
+              <option value="0.6">0.6</option><option value="0.8">0.8</option>
+            </select></div>
+        </div>
       </div>
-      <div class="grid3">
-        <div><label>时长(秒)</label><input id="dur" type="number" value="5" min="1" max="15" step="0.5"></div>
-        <div><label>步数</label><input id="steps" type="number" value="8" min="1" max="50"></div>
-        <div><label>seed(空=随机)</label><input id="seed" type="number" placeholder="随机"></div>
-      </div>
-      <div class="grid2">
-        <div><label>画幅</label><select id="aspect"></select></div>
-        <div><label>分辨率(MP)</label>
-          <select id="megapixels">
-            <option value="0.2">0.2</option><option value="0.3">0.3</option>
-            <option value="0.4" selected>0.4</option><option value="0.5">0.5</option>
-            <option value="0.6">0.6</option><option value="0.8">0.8</option>
-          </select></div>
-      </div>
-      <div id="refImageSizeRow"><label>参考图缩放</label>
+      <div id="refImageSizeRow" class="refsize"><label>参考图缩放</label>
         <select id="ref_image_size"><option value="match">match(快)</option><option value="max">max(保真)</option></select></div>
       <div class="submitrow">
         <button class="primary" id="submitBtn" onclick="submit()">提交</button>
@@ -1719,35 +1739,33 @@ details.sec>summary .editbtn{margin-left:auto}
       <div class="progress" id="prog"><i></i></div>
       <div class="muted" id="submitMsg" style="margin-top:8px"></div>
     </div>
-  </div>
-  <div>
-    <div class="card">
-      <h2>当前任务</h2>
-      <div id="cur"><div class="muted">空闲</div></div>
-      <details class="logBox" id="logBox" style="margin-top:12px">
-        <summary class="muted">诊断日志</summary>
-        <pre class="log" id="log"></pre>
-      </details>
-    </div>
-    <div class="card">
-      <details class="sec" open>
-        <summary>任务记录</summary>
-        <div id="jobs" class="muted">暂无</div>
-      </details>
-    </div>
-    <div class="card">
-      <details class="sec" open>
-        <summary>产物<button class="ghost editbtn" id="clipEditBtn" onclick="event.preventDefault();event.stopPropagation();toggleClipEdit()">编辑</button></summary>
-        <div id="clipBar" class="clipbar" style="display:none">
-          <span class="muted" id="clipCount">已选 0</span>
-          <button class="ghost" onclick="clipSelectAll()">全选</button>
-          <button class="ghost" onclick="clipSelectNone()">取消全选</button>
-          <button class="ghost" style="color:var(--err)" onclick="clipDelete()">删除</button>
-        </div>
-        <div id="clips" class="clips"></div>
-      </details>
-    </div>
-  </div>
+    <div class="statgrid">
+      <div class="card" id="stCur">
+        <h2>当前任务</h2>
+        <div id="cur"><div class="muted">空闲</div></div>
+        <details class="logBox" id="logBox" style="margin-top:12px">
+          <summary class="muted">诊断日志</summary>
+          <pre class="log" id="log"></pre>
+        </details>
+      </div>
+      <div class="card" id="stJobs">
+        <details class="sec" open>
+          <summary>任务记录</summary>
+          <div id="jobs" class="muted">暂无</div>
+        </details>
+      </div>
+      <div class="card" id="stClips">
+        <details class="sec" open>
+          <summary>产物<button class="ghost editbtn" id="clipEditBtn" onclick="event.preventDefault();event.stopPropagation();toggleClipEdit()">编辑</button></summary>
+          <div id="clipBar" class="clipbar" style="display:none">
+            <span class="muted" id="clipCount">已选 0</span>
+            <button class="ghost" onclick="clipSelectAll()">全选</button>
+            <button class="ghost" onclick="clipSelectNone()">取消全选</button>
+            <button class="ghost" style="color:var(--err)" onclick="clipDelete()">删除</button>
+          </div>
+          <div id="clips" class="clips"></div>
+        </details>
+      </div>
     </div>
   </div>
   <div id="editView" style="display:none">
