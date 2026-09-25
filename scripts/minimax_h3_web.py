@@ -3397,7 +3397,7 @@ function uploadMaterial(name,f){
       if(xhr.status<200||xhr.status>=300){ const msg=j.error||('HTTP '+xhr.status);
         $('matMsg').textContent='上传失败：'+msg; notice('上传失败：'+msg); resolve(); return; }
       materials=j.materials||materials;
-      $('matMsg').textContent='已上传：'+((j.material&&j.material.name)||name);
+      $('matMsg').textContent='';
       renderMaterials(); renderAllSlots();
       if($('pickModal').classList.contains('open')) renderPickGrid();
       resolve();
