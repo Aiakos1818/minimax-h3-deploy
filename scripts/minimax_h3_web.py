@@ -1939,6 +1939,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
           <option value="ref2v">参考生视频</option>
         </select>
       </div>
+      <div class="muted" id="shotLabel"></div>
       <div class="progress" id="prog"><i></i></div>
       <div class="muted" id="submitMsg" style="margin-top:8px"></div>
       <div class="formgrid">
@@ -2001,6 +2002,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
       <div class="headacts">
         <button class="primary" id="submitBtn" onclick="submit()">提交</button>
         <button class="ghost" onclick="resetForm()">重置</button>
+        <button class="ghost" onclick="cancelShot()">取消</button>
       </div>
     </div>
     <div class="card" id="matCard">
@@ -2272,7 +2274,7 @@ function route(){
     renderProjHead();
     refreshMaterials();
     if(edit){ refreshEdit(); }
-    else { $('taskCard').style.display='none'; shotName=null; refreshJobs(); refreshOutputs(); }
+    else { $('taskCard').style.display='none'; shotName=null; $('shotLabel').textContent=''; refreshJobs(); refreshOutputs(); }
   }else{
     curProject=null;
     $('homeView').style.display=''; $('projView').style.display='none'; $('editView').style.display='none';
@@ -2382,7 +2384,8 @@ function addShot(){
 }
 function showTaskCard(){
   $('taskCard').style.display='';
-  $('submitMsg').textContent=shotName? ('分镜：'+shotName) : '';
+  $('shotLabel').textContent=shotName? ('分镜：'+shotName) : '';
+  $('submitMsg').textContent='';
   setTimeout(()=>{ $('taskCard').scrollIntoView({block:'start',behavior:'smooth'}); },30);
 }
 function matUrl(pid,file){ return '/material/'+encodeURIComponent(pid)+'/'+encodeURIComponent(String(file).split('/').pop()); }
@@ -2837,7 +2840,7 @@ async function submit(){
     $('submitBtn').disabled=false;
     try{ const r=JSON.parse(xhr.responseText);
       if(xhr.status===202){ $('submitMsg').textContent='已提交: '+r.id; $('prompt').value='';
-        shotName=null; $('taskCard').style.display='none'; }
+        shotName=null; $('shotLabel').textContent=''; $('taskCard').style.display='none'; }
       else notice('提交失败: '+(r.error||xhr.status));
     }catch(e){ notice('提交失败: '+xhr.status); }
     setTimeout(()=>{ $('prog').style.display='none'; },600);
@@ -2847,15 +2850,24 @@ async function submit(){
   xhr.send(fd);
 }
 
-async function resetForm(){
-  const ok=await askConfirm('清空当前填写的内容并恢复默认参数？','重置','清空');
-  if(!ok) return;
+function clearTaskForm(){
   $('mode').value='t2v'; onModeChange();
   $('prompt').value='';
   $('dur').value=5; $('steps').value=8; $('seed').value='';
   $('aspect').value=ASPECTS[0]; $('megapixels').value='0.4'; $('ref_image_size').value='match';
   clearSelMat();
   $('prog').style.display='none'; $('submitMsg').textContent='';
+}
+async function resetForm(){
+  const ok=await askConfirm('清空当前填写的内容并恢复默认参数？','重置','清空');
+  if(!ok) return;
+  clearTaskForm();
+}
+function cancelShot(){
+  shotName=null;
+  $('shotLabel').textContent='';
+  $('taskCard').style.display='none';
+  clearTaskForm();
 }
 
 async function api(path){ const r=await fetch(path); return r.ok? r.json(): null; }
