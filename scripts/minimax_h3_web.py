@@ -689,22 +689,47 @@ class Manager:
             self._write_project(p)
         return mat, None
 
-    def delete_material(self, pid, mid):
+    def _drop_job(self, jid):
+        with self.lock:
+            job = self.jobs.get(jid)
+            if not job:
+                return
+            rel = job["st"].get("clip_rel")
+            img_rel = job["st"].get("image_rel")
+            shutil.rmtree(self._job_dir(jid), ignore_errors=True)
+            del self.jobs[jid]
+        if rel:
+            self.delete_outputs([rel])
+        if img_rel:
+            self.delete_outputs([img_rel])
+
+    def delete_material(self, pid, mid, cascade=True):
         with self.lock:
             p = self.projects.get(pid)
             if not p:
                 return False, "项目不存在"
             mats = p.get("materials") or []
+            found = None
             for i, m in enumerate(mats):
                 if isinstance(m, dict) and m.get("id") == mid:
+                    found = m
                     del mats[i]
                     self._write_project(p)
-                    try:
-                        os.remove(os.path.join(self._materials_dir(pid), m.get("file") or ""))
-                    except OSError:
-                        pass
-                    return True, "已删除素材"
-        return False, "素材不存在"
+                    break
+            if found is None:
+                return False, "素材不存在"
+        try:
+            os.remove(os.path.join(self._materials_dir(pid), found.get("file") or ""))
+        except OSError:
+            pass
+        if cascade:
+            with self.lock:
+                jids = [jid for jid, j in self.jobs.items()
+                        if j["st"].get("material_id") == mid
+                        and (j["st"].get("project") or (j.get("cfg") or {}).get("project")) == pid]
+            for jid in jids:
+                self._drop_job(jid)
+        return True, "已删除素材"
 
     # ---- persistence ----
     def _job_dir(self, jid):
@@ -1097,12 +1122,16 @@ class Manager:
                 job["st"].update(status="cancelled", ended=NOW())
             rel = job["st"].get("clip_rel")
             img_rel = job["st"].get("image_rel")
+            mid = job["st"].get("material_id")
+            pid = job["st"].get("project") or (job.get("cfg") or {}).get("project") or DEFAULT_PROJECT
             shutil.rmtree(self._job_dir(jid), ignore_errors=True)
             del self.jobs[jid]
         if rel:
             self.delete_outputs([rel])
         if img_rel:
             self.delete_outputs([img_rel])
+        if mid:
+            self.delete_material(pid, mid, cascade=False)
         return True, "已删除分镜及其产物"
 
     # ---- snapshots ----
@@ -2308,7 +2337,6 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
       <details class="sec" open>
         <summary onclick="toggleSec(event)"><span class="setoggle">创作图片列表</span></summary>
         <div class="muted" id="imgStatus" style="margin-bottom:8px"></div>
-        <div id="imgList"></div>
         <div id="imgJobs"></div>
       </details>
     </div>
@@ -3063,7 +3091,6 @@ function renderMaterials(){
     });
   }
   $('matSub').textContent=materials.length? (materials.length+' 个素材') : '';
-  renderImageList();
   renderImgI2ISrc();
   renderProjHead();
 }
@@ -3115,9 +3142,7 @@ function openImageCreator(){
   $('imgTaskCard').style.display='none';
   $('imgStatus').textContent='';
   imgName=null;
-  $('imgList')._sig=null;
   $('imgJobs')._sig=null;
-  renderImageList();
   refreshImageJobs();
   renderProjHead();
   setTimeout(()=>{ $('imgCard').scrollIntoView({block:'start',behavior:'smooth'}); },30);
@@ -3159,34 +3184,6 @@ function cancelImageMaterial(){
   $('imgTaskCard').style.display='none';
   clearImageForm();
 }
-function renderImageList(){
-  const box=$('imgList'); if(!box) return;
-  const list=materials.filter(m=>m.kind==='image' && m.gen);
-  const sig=list.map(m=>[m.id,m.name,m.gen,m.exists?1:0].join(',')).join('\n');
-  if(box._sig===sig) return;
-  box._sig=sig; box.innerHTML='';
-  if(!list.length){ box.innerHTML=''; return; }
-  const pid=curProject;
-  list.forEach(m=>{
-    const nm=matSaveName(m), gen=GEN_CN[m.gen]||m.gen||'生成';
-    const st=m.exists? '<span class="st done">已完成</span>' : '<span class="st failed">文件缺失</span>';
-    const d=document.createElement('div'); d.className='job';
-    d.innerHTML='<span class="jthumbwrap"><img class="jthumb" loading="lazy" title="'+esc(nm)+'" src="'+thumbUrl(pid,m.file,m.thumb_v,nm)+'">'+
-      '<a class="thumbdl" href="'+esc(matUrl(pid,m.file,nm))+'" download="'+esc(nm)+
-      '" title="单击查看大图（右键另存为原图）" onclick="event.preventDefault()"></a></span>'+
-      '<span class="meta"><b>'+esc(m.name)+'</b><br><b>'+esc(m.id)+'</b><br>'+
-        esc(gen)+' · '+fmtSize(m.size)+'<br>'+esc(m.ts||'')+'<br>'+st+'</span>'+
-      '<span class="jobsacts"><button class="ghost">详情</button> <button class="ghost">删除</button> '+
-        '<button class="ghost">查看</button> <button class="ghost">复用</button></span>';
-    const ov=d.querySelector('.thumbdl'); if(ov) ov.addEventListener('click',()=>viewMaterial(m.id));
-    const btns=d.querySelectorAll('.jobsacts button');
-    btns[0].onclick=()=>detailMaterial(m.id);
-    btns[1].onclick=()=>deleteMaterial(m.id);
-    btns[2].onclick=()=>viewMaterial(m.id);
-    btns[3].onclick=()=>reuseMaterial(m.id);
-    box.appendChild(d);
-  });
-}
 async function refreshImageJobs(){
   const box=$('imgJobs'); if(!box || !curProject || $('imgCard').style.display==='none') return;
   const r=await api('/api/jobs?project='+encodeURIComponent(curProject)); if(!r) return;
@@ -3216,6 +3213,7 @@ async function refreshImageJobs(){
     if(j.status==='cancelled'||j.status==='failed'||j.status==='interrupted')
       acts+=' <button class="ghost" onclick="retryJob(\''+j.id+'\')">重新生成</button>';
     if(j.material_id) acts+=' <button class="ghost" onclick="detailMaterial(\''+j.material_id+'\')">查看</button>';
+    if(j.material_id && j.status==='done') acts+=' <button class="ghost" onclick="reuseMaterial(\''+j.material_id+'\')">复用</button>';
     let thumb='';
     const mt=j.material_id? materials.find(m=>m.id===j.material_id) : null;
     if(mt && mt.exists){
@@ -3423,10 +3421,13 @@ function uploadMaterial(name,f){
 async function deleteMaterial(mid){
   const m=matById(mid); if(!m) return;
   const r0=await api('/api/jobs?project='+encodeURIComponent(curProject));
-  const used=((r0&&r0.jobs)||[]).filter(j=>j.mode!=='edit' &&
+  const jobs=((r0&&r0.jobs)||[]);
+  const used=jobs.filter(j=>j.mode!=='edit' &&
     Object.keys(j.media||{}).some(k=>Array.isArray(j.media[k]) &&
       j.media[k].some(p=>String(p).split('/').pop()===m.file)));
+  const task=jobs.find(j=>j.material_id===mid);
   let msg='删除素材「<b>'+esc(m.name)+'</b>」？';
+  if(task) msg+='<br>将同时删除其生成任务 <b>'+esc(task.name||task.id)+'</b>。';
   if(used.length){
     msg+='<br><br>以下分镜列表用到了该素材：<br>'+
       used.map(j=>'· '+esc(j.name||j.id)).join('<br>')+
@@ -3439,6 +3440,7 @@ async function deleteMaterial(mid){
   const j=await r.json().catch(()=>({}));
   if(!r.ok){ notice('删除失败：'+(j.error||j.msg||r.status)); return; }
   materials=j.materials||materials; renderMaterials(); renderAllSlots();
+  refreshJobs(); refreshImageJobs();
 }
 async function openPick(kind, mode){
   if(!curProject){ notice('请先进入一个项目'); return; }
@@ -3748,12 +3750,14 @@ async function retryJob(id){
 async function jobAct(id,act){
   const isDel=act!=='cancel';
   const j=jobsById[id]||{};
+  const isImg=(j.mode==='t2i'||j.mode==='i2i');
+  const what=isImg?'图片任务':'分镜';
   const label=esc(j.name||id)+(j.name?' <span class="muted">'+id+'</span>':'');
-  const ok=await askConfirm((isDel?'删除分镜 ':'取消分镜 ')+'<b>'+label+'</b>？'+
-                            (isDel?'<br>将同时删除其产物视频，不可恢复。':''),
-                            isDel?'删除分镜':'取消分镜', isDel?'删除':'确定');
+  const ok=await askConfirm((isDel?'删除':'取消')+what+' <b>'+label+'</b>？'+
+                            (isDel?'<br>将同时删除其'+(isImg?'生成图片':'产物视频')+'，不可恢复。':''),
+                            isDel?('删除'+what):('取消'+what), isDel?'删除':'确定');
   if(!ok) return;
-  fetch('/api/jobs/'+id+'/'+act,{method:'POST'}).then(()=>{refreshJobs();refreshOutputs();refreshProjects();}); }
+  fetch('/api/jobs/'+id+'/'+act,{method:'POST'}).then(()=>{refreshJobs();refreshOutputs();refreshProjects();refreshImageJobs();refreshMaterials();}); }
 
 async function refreshOutputs(){
   if(!curProject){ clipsCache=[]; return; }
