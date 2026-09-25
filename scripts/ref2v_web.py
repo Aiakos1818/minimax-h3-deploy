@@ -314,10 +314,15 @@ class Manager:
             job = self.jobs.get(jid)
             if not job:
                 return
-            job["st"][key] = value
+            st = job["st"]
+            if key == "status" and value in ("done", "failed", "cancelled", "interrupted") \
+                    and "duration" not in st and st.get("created_ts"):
+                st["duration"] = int(time.time() - st["created_ts"])
+            st[key] = value
             for k, v in extra.items():
-                job["st"][k] = v
-            self.persist_status(job)
+                st[k] = v
+            if key in ("status", "stage") or extra:
+                self.persist_status(job)
 
     def _stage(self, job):
         try:
@@ -436,7 +441,8 @@ class Manager:
             if not job or job["st"].get("status") not in ("queued", "running"):
                 return False, "任务不存在或已结束"
             if job["st"]["status"] == "queued":
-                job["st"].update(status="cancelled", ended=NOW())
+                job["st"].update(status="cancelled", ended=NOW(),
+                                 duration=int(time.time() - job["st"].get("created_ts", time.time())))
                 self.persist_status(job)
                 self.queue = [x for x in self.queue if x != jid]
                 return True, "已取消(排队中)"
@@ -823,6 +829,12 @@ button.ghost{background:#20242d;color:var(--fg);border:1px solid var(--line);bor
 .curMeta{font-size:12px;color:var(--mut);line-height:1.7}
 details.logBox summary{cursor:pointer}
 details.logBox pre{margin-top:8px}
+details.sec>summary{list-style:none;cursor:pointer;font-size:14px;color:var(--mut);font-weight:600;
+       letter-spacing:.03em;display:flex;align-items:center;gap:6px}
+details.sec>summary::-webkit-details-marker{display:none}
+details.sec>summary::before{content:"\25BC";font-size:.8em;line-height:1;color:var(--fg);transition:transform .2s}
+details.sec:not([open])>summary::before{transform:rotate(-90deg)}
+details.sec[open]>summary{margin-bottom:10px}
 pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(--line);border-radius:8px;
         padding:8px;font-size:12px;color:#c7cede;white-space:pre-wrap;word-break:break-all}
 .job{display:flex;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
@@ -895,12 +907,16 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
       </details>
     </div>
     <div class="card">
-      <h2>任务记录</h2>
-      <div id="jobs" class="muted">暂无</div>
+      <details class="sec" open>
+        <summary>任务记录</summary>
+        <div id="jobs" class="muted">暂无</div>
+      </details>
     </div>
     <div class="card">
-      <h2>产物</h2>
-      <div id="clips" class="clips"></div>
+      <details class="sec" open>
+        <summary>产物</summary>
+        <div id="clips" class="clips"></div>
+      </details>
     </div>
   </div>
 </main>
@@ -1051,13 +1067,16 @@ async function refreshJobs(){
     const d=document.createElement('div'); d.className='job';
     const p=j.params||{};
     const info=[mediaBrief(j.media), p.dur?p.dur+'s':'', p.megapixels?p.megapixels+'MP':''].filter(Boolean).join(' · ');
+    const used = (j.duration!=null)? j.duration : (j.created_ts? Math.max(0, Date.now()/1000-j.created_ts) : null);
+    const usedTxt = (used!=null)? ('用时 '+fmtDur(used)) : '';
+    const line2 = [info, usedTxt].filter(Boolean).join(' · ');
     const note = j.status==='failed'? '<span style="color:var(--err)">'+friendlyErr(j.err)+'</span>' : (j.stage&&j.status==='running'? j.stage.label : '');
     let acts='';
     if(j.status==='queued'||j.status==='running') acts='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'cancel\')">取消</button>';
     else acts='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'delete\')">删除</button>';
     if(j.clip_rel) acts+=' <button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看</button>';
     d.innerHTML='<span class="'+stCls(j.status)+'">'+(STATUS_CN[j.status]||j.status)+'</span>'+
-      '<span class="meta"><b>'+j.id+'</b><br>'+info+'<br>'+(note||j.created||'')+'</span>'+acts;
+      '<span class="meta"><b>'+j.id+'</b><br>'+line2+'<br>'+(note||j.created||'')+'</span>'+acts;
     box.appendChild(d);
   });
 }
