@@ -1772,13 +1772,15 @@ button.ghost{background:#20242d;color:var(--fg);border:1px solid var(--line);bor
 .bar.indet>i{width:35%;animation:slide 1.3s ease-in-out infinite}
 @keyframes slide{0%{margin-left:-35%}100%{margin-left:100%}}
 .curMeta{font-size:12px;color:var(--mut);line-height:1.7}
-details.logBox summary{cursor:pointer}
+details.logBox summary{list-style:none}
+details.logBox summary::-webkit-details-marker{display:none}
 details.logBox pre{margin-top:8px}
-details.sec>summary{list-style:none;cursor:pointer;font-size:14px;color:var(--mut);font-weight:600;
+details.sec>summary{list-style:none;font-size:14px;color:var(--mut);font-weight:600;
        letter-spacing:.03em;display:flex;align-items:center;gap:6px}
 details.sec>summary::-webkit-details-marker{display:none}
-details.sec>summary::before{content:"\25BC";font-size:.8em;line-height:1;color:var(--fg);transition:transform .2s}
-details.sec:not([open])>summary::before{transform:rotate(-90deg)}
+.setoggle{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.setoggle::before{content:"\25BC";font-size:.8em;line-height:1;color:var(--fg);transition:transform .2s}
+details:not([open])>summary .setoggle::before{transform:rotate(-90deg)}
 details.sec[open]>summary{margin-bottom:10px}
 pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(--line);border-radius:8px;
         padding:8px;font-size:12px;color:#c7cede;white-space:pre-wrap;word-break:break-all}
@@ -2036,7 +2038,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
     <div class="statgrid">
       <div class="card" id="matCard">
         <details class="sec">
-          <summary>素材库 <span class="muted" id="matSub"></span></summary>
+          <summary onclick="toggleSec(event)"><span class="setoggle">素材库 <span class="muted" id="matSub"></span></span></summary>
           <div class="matup">
             <input id="matName" placeholder="素材名称（项目内唯一）" onkeydown="if(event.key==='Enter'){event.preventDefault();uploadMaterial()}">
             <input id="matFile" type="file" accept="image/*,video/*,audio/*" onchange="onMatFileChange()">
@@ -2048,7 +2050,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
       </div>
       <div class="card" id="stJobs">
         <details class="sec" open>
-          <summary><span>分镜列表</span>
+          <summary onclick="toggleSec(event)"><span class="setoggle">分镜列表</span>
             <span class="secbtn"><button class="ghost" onclick="event.preventDefault();event.stopPropagation();openEdit()">剪辑</button></span>
           </summary>
           <div id="jobs" class="muted">暂无</div>
@@ -2084,13 +2086,13 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
         <h2>当前渲染</h2>
         <div id="editCur"><div class="muted">空闲</div></div>
         <details class="logBox" style="margin-top:12px">
-          <summary class="muted">日志</summary>
+          <summary class="muted" onclick="toggleSec(event)"><span class="setoggle">日志</span></summary>
           <pre class="log" id="editLog"></pre>
         </details>
       </div>
       <div class="card">
         <details class="sec" open>
-          <summary>成片</summary>
+          <summary onclick="toggleSec(event)"><span class="setoggle">成片</span></summary>
           <div id="editList" class="clips"></div>
         </details>
       </div>
@@ -2229,6 +2231,11 @@ const TRANS_CN = {cut:'硬切', fade:'黑场渐隐', dissolve:'交叉溶解', pu
 const EDIT_ASPECTS = [['0','原始画幅'],['2.39','2.39:1 宽银幕'],['16:9','16:9 横屏'],
   ['9:16','9:16 竖屏'],['1:1','1:1 方形'],['4:3','4:3 横版'],['3:4','3:4 竖版']];
 function projName(pid){ return projNames[pid] || (pid==='default'?'默认项目':(pid||'')); }
+function toggleSec(e){
+  e.preventDefault();
+  const st=e.target.closest('.setoggle');
+  if(st){ const d=st.closest('details'); if(d) d.open=!d.open; }
+}
 function projSub(p){
   return [p.counts.total+' 个分镜',
           p.counts.running?p.counts.running+' 进行中':null,
