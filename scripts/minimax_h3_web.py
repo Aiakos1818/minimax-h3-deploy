@@ -4285,6 +4285,8 @@ def main():
                     help="HTTP Basic password (any username); default %s" % DEFAULT_PASSWORD)
     ap.add_argument("--start", action="store_true")
     ap.add_argument("--stop", action="store_true")
+    ap.add_argument("--stop-qwen", action="store_true",
+                    help="unload the resident Qwen-Image-2.1 service")
     ap.add_argument("--status", action="store_true")
     a = ap.parse_args()
 
@@ -4326,7 +4328,11 @@ def main():
                     break
             if not stopped:
                 print("pid %d still alive after 10s" % pid)
-        stop_qwen_server()
+        print("(resident models are kept; use --stop-qwen to unload Qwen-Image-2.1)")
+        return
+
+    if a.stop_qwen:
+        print("qwen:", "unloaded" if stop_qwen_server() else "was not running")
         return
 
     if a.status:
