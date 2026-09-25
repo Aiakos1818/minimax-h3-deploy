@@ -15,7 +15,7 @@ Usage (called by the web console; can be run by hand too):
     --prompt "..." --image ref.png --dur 5 --steps 20 \
     --out ~/MiniMax-H3-Deploy/output/ref2v/<job>.mp4
 """
-import argparse, glob, json, os, random, shutil, signal, subprocess, sys, time, urllib.request
+import argparse, glob, json, os, random, re, shutil, signal, subprocess, sys, time, urllib.request
 
 import numpy as np
 import av
@@ -28,6 +28,7 @@ START_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "start-comfyui-for-minimax-h3.sh")
 STOP_SH = os.path.expanduser("~/ComfyUI-Deploy/stop.sh")
 STATE_PATH = HOME + "/.ref2v_service.json"
+COMFY_LOG = os.path.expanduser("~/ComfyUI-Deploy/comfy.log")
 
 CLIP = "qwen3vl_32b_minimax_h3_int4_convrot.safetensors"
 VAE_VIDEO = "minimax_h3_video_vae_int8_convrot.safetensors"
@@ -313,9 +314,30 @@ def running_prompts():
     return {it[1] for it in (q.get("queue_running") or [])}
 
 
+def sample_progress():
+    """Latest 'done/total' step from ComfyUI's tqdm line in comfy.log (or None).
+
+    Serial execution means at most one prompt is sampling, so the tail of the
+    shared server log is ours to read."""
+    try:
+        with open(COMFY_LOG, "rb") as f:
+            f.seek(0, 2)
+            start = max(0, f.tell() - 16384)
+            f.seek(start)
+            tail = f.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+    ms = re.findall(r"(\d+(?:\.\d+)?)/(\d+(?:\.\d+)?)\s*\[", tail)
+    if not ms:
+        return None
+    a, b = ms[-1]
+    return int(float(a)), int(float(b))
+
+
 def wait_done(pid, timeout_s=9000):
     t0 = time.time()
     announced = False
+    last_prog = None
     while time.time() - t0 < timeout_s:
         if _cancel["hit"]:
             sys.exit("cancelled")
@@ -337,6 +359,11 @@ def wait_done(pid, timeout_s=9000):
         if not announced and pid in running_prompts():
             announced = True
             log("[stage] sampling")
+        if announced:
+            pr = sample_progress()
+            if pr and pr != last_prog:
+                last_prog = pr
+                log("[progress] %d/%d" % pr)
         time.sleep(3)
     sys.exit("wait timeout")
 
@@ -366,7 +393,7 @@ def main():
     ap.add_argument("--aspect", default="16:9 (Widescreen)")
     ap.add_argument("--megapixels", type=float, default=0.4)
     ap.add_argument("--multiple", type=int, default=32)
-    ap.add_argument("--steps", type=int, default=20)
+    ap.add_argument("--steps", type=int, default=8)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--ref-image-size", choices=("match", "max"), default="match")
     ap.add_argument("--tag", default="ref2v")

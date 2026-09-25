@@ -196,10 +196,11 @@ _STAGE_PATTERNS = [
     (r"NODE ERROR", "节点出错"),
     (r"submit error", "提交错误"),
 ]
+_PROG_RE = re.compile(r"\[progress\]\s+(\d+)/(\d+)")
 
 
 def stage_from_log(text):
-    lines = [l for l in text.splitlines() if l.strip()]
+    lines = [l for l in text.splitlines() if l.strip() and "[progress]" not in l]
     for pat, lab in reversed(_STAGE_PATTERNS):
         for l in reversed(lines):
             if re.search(pat, l):
@@ -325,6 +326,13 @@ class Manager:
         except Exception:
             text = ""
         job["st"]["stage"] = {"label": stage_from_log(text), "ts": NOW()}
+        m = None
+        for m in _PROG_RE.finditer(text):
+            pass
+        if m:
+            cur, total = int(m.group(1)), int(m.group(2))
+            if total > 0 and cur <= total:
+                job["st"]["progress"] = {"cur": cur, "total": total}
 
     def blocking_busy(self):
         qr = self.comfy.running_prompts()
@@ -455,8 +463,10 @@ class Manager:
     def info(self, job):
         st = job["st"]
         return {"id": st["id"], "status": st.get("status"), "created": st.get("created"),
+                "created_ts": st.get("created_ts"),
                 "ended": st.get("ended"), "duration": st.get("duration"),
-                "stage": st.get("stage"), "err": st.get("err"), "seed": st.get("seed"),
+                "stage": st.get("stage"), "progress": st.get("progress"),
+                "err": st.get("err"), "seed": st.get("seed"),
                 "params": st.get("params"), "media": st.get("media"),
                 "clip_rel": st.get("clip_rel"), "clip_size": st.get("clip_size"),
                 "clip_frames": st.get("clip_frames"), "clip_seconds": st.get("clip_seconds"),
@@ -741,7 +751,7 @@ def make_handler(mgr):
                     "aspect": _first(fields, "aspect", ASPECTS[0]),
                     "megapixels": _to_float(_first(fields, "megapixels"), 0.4, lo=0.1, hi=2.0),
                     "multiple": 32,
-                    "steps": _to_int(_first(fields, "steps"), 20, lo=1, hi=50),
+                    "steps": _to_int(_first(fields, "steps"), 8, lo=1, hi=50),
                     "ref_image_size": "max" if _first(fields, "ref_image_size") == "max" else "match",
                 },
                 "media": {},
@@ -805,6 +815,14 @@ button.ghost{background:#20242d;color:var(--fg);border:1px solid var(--line);bor
        padding:6px 10px;font-size:13px;cursor:pointer}
 .progress{height:6px;background:#20242d;border-radius:3px;overflow:hidden;margin-top:8px;display:none}
 .progress>i{display:block;height:100%;width:0;background:var(--acc);transition:width .2s}
+.curState{font-size:18px;font-weight:600;margin-bottom:8px}
+.bar{height:8px;background:#20242d;border-radius:4px;overflow:hidden;margin:4px 0 8px}
+.bar>i{display:block;height:100%;width:0;background:var(--acc);transition:width .3s}
+.bar.indet>i{width:35%;animation:slide 1.3s ease-in-out infinite}
+@keyframes slide{0%{margin-left:-35%}100%{margin-left:100%}}
+.curMeta{font-size:12px;color:var(--mut);line-height:1.7}
+details.logBox summary{cursor:pointer}
+details.logBox pre{margin-top:8px}
 pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(--line);border-radius:8px;
         padding:8px;font-size:12px;color:#c7cede;white-space:pre-wrap;word-break:break-all}
 .job{display:flex;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
@@ -848,7 +866,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
       <div class="filebox"><input id="fAud" type="file" accept="audio/*" multiple><ul id="lAud"></ul></div>
       <div class="grid3">
         <div><label>时长(秒)</label><input id="dur" type="number" value="5" min="1" max="15" step="0.5"></div>
-        <div><label>步数</label><input id="steps" type="number" value="20" min="1" max="50"></div>
+        <div><label>步数</label><input id="steps" type="number" value="8" min="1" max="50"></div>
         <div><label>seed(空=随机)</label><input id="seed" type="number" placeholder="随机"></div>
       </div>
       <div class="grid2">
@@ -870,8 +888,11 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   <div>
     <div class="card">
       <h2>当前任务</h2>
-      <div id="cur" class="muted">空闲</div>
-      <pre class="log" id="log"></pre>
+      <div id="cur"><div class="muted">空闲</div></div>
+      <details class="logBox" id="logBox" style="margin-top:12px">
+        <summary class="muted">诊断日志</summary>
+        <pre class="log" id="log"></pre>
+      </details>
     </div>
     <div class="card">
       <h2>任务记录</h2>
@@ -892,7 +913,53 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 <script>
 const $ = (id)=>document.getElementById(id);
 const ASPECTS = __ASPECTS__;
-let logOffset = 0, lastJob = null;
+let logOffset = 0, lastJob = null, jobsById = {}, curStart = 0, curRunning = false;
+const STATUS_CN = {queued:'排队中', running:'进行中', done:'已完成', failed:'失败', cancelled:'已取消', interrupted:'已中断'};
+const MEDIA_CN = {ref_image:'图', ref_video:'视频', ref_audio:'音频'};
+function friendlyErr(e){
+  if(!e) return '';
+  if(/runner exited rc=/.test(e)) return '生成进程异常退出';
+  if(/no mp4 saved/.test(e)) return '未产出视频';
+  if(/NODE ERROR|out of memory|OOM/i.test(e)) return '显存不足或节点出错';
+  if(/取消|cancel/i.test(e)) return '已取消';
+  return e.slice(0,120);
+}
+function mediaBrief(m){
+  if(!m) return '';
+  return Object.keys(MEDIA_CN).map(k=> (m[k]&&m[k].length)? m[k].length+MEDIA_CN[k] : null).filter(Boolean).join(' · ');
+}
+function friendlyStatus(j){
+  if(j.status==='running'){
+    const lab = (j.stage&&j.stage.label) || '进行中';
+    const p = j.progress;
+    return p? (lab+' '+p.cur+'/'+p.total) : lab;
+  }
+  if(j.status==='done') return '已完成'+(j.clip_seconds? ' · '+j.clip_seconds+'s':'');
+  if(j.status==='failed') return '失败：'+friendlyErr(j.err);
+  if(j.status==='cancelled') return '已取消';
+  if(j.status==='interrupted') return '已中断(web 重启)，请重新提交';
+  return STATUS_CN[j.status]||j.status;
+}
+function fmtDur(sec){ sec=Math.max(0,Math.floor(sec)); return String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0'); }
+function renderCurrent(j){
+  curStart = j.created_ts || curStart || 0;
+  curRunning = (j.status==='running'||j.status==='queued');
+  const p=j.params||{};
+  const meta=[mediaBrief(j.media), p.dur?p.dur+'s':'', p.aspect?p.aspect.split(' ')[0]:'',
+              p.megapixels?p.megapixels+'MP':'', p.steps?p.steps+'步':'', j.seed?('seed '+j.seed):''].filter(Boolean).join(' · ');
+  let bar='';
+  if(j.status==='running' && j.progress && j.progress.total){
+    bar='<div class="bar"><i style="width:'+Math.round(j.progress.cur/j.progress.total*100)+'%"></i></div>';
+  }else if(j.status==='running'||j.status==='queued'){
+    bar='<div class="bar indet"><i></i></div>';
+  }
+  const cls=(j.status==='failed')?' style="color:var(--err)"':'';
+  $('cur').innerHTML='<div class="curState"'+cls+'>'+friendlyStatus(j)+'</div>'+bar+
+    '<div class="curMeta"><b>'+j.id+'</b>'+(meta?'<br>'+meta:'')+
+    (curRunning&&curStart?'<br>已用时 <span id="curElapsed">'+fmtDur(Date.now()/1000-curStart)+'</span>':'')+
+    (j.status==='done'&&j.clip_rel?'<br><button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看产物</button>':'')+'</div>';
+}
+setInterval(()=>{ const el=$('curElapsed'); if(el&&curRunning&&curStart) el.textContent=fmtDur(Date.now()/1000-curStart); },1000);
 
 for (const a of ASPECTS){ const o=document.createElement('option'); o.value=a; o.textContent=a; $('aspect').appendChild(o); }
 $('aspect').value = ASPECTS[0];
@@ -958,9 +1025,11 @@ async function refreshState(){
   }
   $('pQ').textContent='队列 '+((s.queue||[]).length+(s.current?1:0));
   if(s.current){
-    const j=s.current, st=j.stage? j.stage.label:'运行中';
-    $('cur').innerHTML='<b>'+j.id+'</b> · '+st;
+    const j=s.current;
     if(lastJob!==j.id){ lastJob=j.id; logOffset=0; $('log').textContent=''; }
+    renderCurrent(j);
+  }else if(lastJob && jobsById[lastJob]){
+    renderCurrent(jobsById[lastJob]);
   }
 }
 
@@ -978,17 +1047,17 @@ async function refreshJobs(){
   if(!r.jobs.length){ box.innerHTML='<span class="muted">暂无</span>'; return; }
   box.innerHTML='';
   r.jobs.slice(0,50).forEach(j=>{
+    jobsById[j.id]=j;
     const d=document.createElement('div'); d.className='job';
     const p=j.params||{};
-    const info=[p.dur?p.dur+'s':'', (j.media&&j.media.ref_image?j.media.ref_image.length+'图':''),
-                (j.media&&j.media.ref_video?j.media.ref_video.length+'视频':''),
-                (j.media&&j.media.ref_audio?j.media.ref_audio.length+'音频':'')].filter(Boolean).join(' · ');
+    const info=[mediaBrief(j.media), p.dur?p.dur+'s':'', p.megapixels?p.megapixels+'MP':''].filter(Boolean).join(' · ');
+    const note = j.status==='failed'? '<span style="color:var(--err)">'+friendlyErr(j.err)+'</span>' : (j.stage&&j.status==='running'? j.stage.label : '');
     let acts='';
     if(j.status==='queued'||j.status==='running') acts='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'cancel\')">取消</button>';
     else acts='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'delete\')">删除</button>';
     if(j.clip_rel) acts+=' <button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看</button>';
-    d.innerHTML='<span class="'+stCls(j.status)+'">'+j.status+'</span>'+
-      '<span class="meta"><b>'+j.id+'</b><br>'+info+'<br>'+(j.err||j.created||'')+'</span>'+acts;
+    d.innerHTML='<span class="'+stCls(j.status)+'">'+(STATUS_CN[j.status]||j.status)+'</span>'+
+      '<span class="meta"><b>'+j.id+'</b><br>'+info+'<br>'+(note||j.created||'')+'</span>'+acts;
     box.appendChild(d);
   });
 }
@@ -1079,7 +1148,11 @@ def main():
         print("url: http://%s:%d/" % (a.host, a.port))
         if pid:
             try:
-                s = json.load(urllib.request.urlopen("http://127.0.0.1:%d/api/state" % a.port, timeout=3))
+                auth = base64.b64encode(("aiakos:" + a.password).encode()).decode()
+                req = urllib.request.Request(
+                    "http://127.0.0.1:%d/api/state" % a.port,
+                    headers={"Authorization": "Basic " + auth})
+                s = json.load(urllib.request.urlopen(req, timeout=3))
                 print("comfy:", s["comfy"]); print("current:", (s["current"] or {}).get("id"))
                 print("queue:", len(s["queue"]))
             except Exception as e:
