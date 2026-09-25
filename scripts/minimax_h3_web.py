@@ -1614,7 +1614,7 @@ details.sec>summary .editbtn{margin-left:auto}
 .junc .start{color:var(--ok)}
 .addclip{position:absolute;top:6px;right:6px;background:var(--acc);color:#fff;border:0;border-radius:6px;
        padding:2px 8px;font-size:12px;cursor:pointer;z-index:1}
-.formgrid,.params,.statgrid{display:block}
+.formgrid,.params,.statgrid,.editgrid{display:block}
 @media(min-width:981px){
   .formgrid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:14px;align-items:start}
   .formgrid>.fcol{min-width:0}
@@ -1627,6 +1627,8 @@ details.sec>summary .editbtn{margin-left:auto}
             grid-template-areas:"cur clips" "jobs clips"}
   .statgrid>.card{margin-bottom:0}
   #stCur{grid-area:cur}#stJobs{grid-area:jobs}#stClips{grid-area:clips}
+  .editgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr);gap:14px}
+  .editgrid>.card{margin-bottom:0}
 }
 @media(max-width:980px){.cols{grid-template-columns:1fr}}
 @media(max-width:640px){.grid3{grid-template-columns:1fr 1fr}textarea,input,select{font-size:16px}}
@@ -1770,45 +1772,41 @@ details.sec>summary .editbtn{margin-left:auto}
   </div>
   <div id="editView" style="display:none">
     <div class="card" id="editHead"></div>
-    <div class="cols">
-      <div>
-        <div class="card">
-          <div class="cardhead">
-            <h2>时间线</h2>
-            <span class="bcbar">
-              <button class="ghost" onclick="renderEdit()">预览/导出</button>
-              <button class="ghost" onclick="saveEdit()">保存</button>
-              <button class="ghost" onclick="backToProject()">返回项目</button>
-            </span>
-          </div>
-          <div class="grid3">
-            <div><label>成片画幅</label><select id="eAspect"></select></div>
-            <div><label>片头淡入(s)</label><input id="eFadeIn" type="number" value="0" min="0" max="3" step="0.1"></div>
-            <div><label>片尾淡出(s)</label><input id="eFadeOut" type="number" value="0" min="0" max="3" step="0.1"></div>
-          </div>
-          <div class="muted" id="editMsg" style="margin-top:8px"></div>
-          <div id="timeline" class="timeline"></div>
-        </div>
-        <div class="card">
-          <div class="cardhead"><h2>添加片段</h2><span class="muted">点缩略图加入时间线</span></div>
-          <div id="pickClips" class="clips"></div>
-        </div>
+    <div class="card">
+      <div class="cardhead">
+        <h2>时间线</h2>
+        <span class="bcbar">
+          <button class="ghost" onclick="renderEdit()">预览/导出</button>
+          <button class="ghost" onclick="saveEdit()">保存</button>
+          <button class="ghost" onclick="backToProject()">返回项目</button>
+        </span>
       </div>
-      <div>
-        <div class="card">
-          <h2>当前渲染</h2>
-          <div id="editCur"><div class="muted">空闲</div></div>
-          <details class="logBox" style="margin-top:12px">
-            <summary class="muted">日志</summary>
-            <pre class="log" id="editLog"></pre>
-          </details>
-        </div>
-        <div class="card">
-          <details class="sec" open>
-            <summary>成片</summary>
-            <div id="editList" class="clips"></div>
-          </details>
-        </div>
+      <div class="grid3" style="max-width:640px">
+        <div><label>成片画幅</label><select id="eAspect"></select></div>
+        <div><label>片头淡入(s)</label><input id="eFadeIn" type="number" value="0" min="0" max="3" step="0.1"></div>
+        <div><label>片尾淡出(s)</label><input id="eFadeOut" type="number" value="0" min="0" max="3" step="0.1"></div>
+      </div>
+      <div class="muted" id="editMsg" style="margin-top:8px"></div>
+      <div id="timeline" class="timeline"></div>
+    </div>
+    <div class="card">
+      <div class="cardhead"><h2>添加片段</h2><span class="muted">点缩略图加入时间线</span></div>
+      <div id="pickClips" class="clips"></div>
+    </div>
+    <div class="editgrid">
+      <div class="card">
+        <h2>当前渲染</h2>
+        <div id="editCur"><div class="muted">空闲</div></div>
+        <details class="logBox" style="margin-top:12px">
+          <summary class="muted">日志</summary>
+          <pre class="log" id="editLog"></pre>
+        </details>
+      </div>
+      <div class="card">
+        <details class="sec" open>
+          <summary>成片</summary>
+          <div id="editList" class="clips"></div>
+        </details>
       </div>
     </div>
   </div>
