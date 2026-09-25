@@ -3032,7 +3032,7 @@ async function refreshJobs(){
       thumb='<div class="jthumb ph static" title="'+(STATUS_CN[j.status]||j.status)+'"></div>';
     }
     const head = j.name
-      ? '<b>'+esc(j.name)+'</b><br><span class="muted">'+esc(j.id)+'</span>'
+      ? '<b>'+esc(j.name)+'</b><br><b>'+esc(j.id)+'</b>'
       : '<b>'+esc(j.id)+'</b>';
     d.innerHTML=thumb+
       '<span class="meta">'+head+'<br>'+line2+'<br>'+(note||j.created||'')+
