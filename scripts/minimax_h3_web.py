@@ -2686,13 +2686,13 @@ function renderMaterials(){
   const sig=materials.map(m=>[m.id,m.name,m.kind,m.exists?1:0].join(',')).join('\n');
   if(box._sig!==sig){
     box._sig=sig; box.innerHTML='';
-    if(!materials.length){ box.innerHTML='<div class="matempty">还没有素材，先在上方上传。</div>'; }
     [['image','图片'],['video','视频'],['audio','音频']].forEach(([kind,label])=>{
       const list=materials.filter(m=>m.kind===kind);
-      if(!list.length) return;
       const sec=document.createElement('div'); sec.className='matgroup';
       const hd=document.createElement('div'); hd.className='matgrouphead';
       hd.textContent=label+' ('+list.length+')';
+      sec.appendChild(hd);
+      if(!list.length){ box.appendChild(sec); return; }
       const g=document.createElement('div'); g.className='matgrid';
       list.forEach(m=>{
         const d=document.createElement('div'); d.className='matcard';
@@ -2721,7 +2721,7 @@ function renderMaterials(){
         ma.appendChild(rm); d.appendChild(ma);
         g.appendChild(d);
       });
-      sec.appendChild(hd); sec.appendChild(g); box.appendChild(sec);
+      sec.appendChild(g); box.appendChild(sec);
     });
   }
   $('matSub').textContent=materials.length? (materials.length+' 个素材') : '';
