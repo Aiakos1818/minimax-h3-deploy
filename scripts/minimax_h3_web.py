@@ -1850,6 +1850,9 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   .params .fseed{order:5}
   .cardhead.modehead{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   .cardhead.modehead #mode{width:100%;min-width:0}
+  .formgrid>.fcol:last-child{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
+  .params{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
+  #taskCard>.headacts{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
   #stClips>.sumacts{gap:6px}
   #stClips>.sumacts button{padding:6px 8px;font-size:12px}
   .jobsacts{flex-basis:100%}
