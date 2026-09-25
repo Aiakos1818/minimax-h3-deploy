@@ -550,6 +550,7 @@ class Manager:
                         "init_name": m.get("init_name"),
                         "seed": (None if m.get("seed") is None else str(m.get("seed"))),
                         "thumb_v": v, "exists": exists})
+        out.reverse()
         return out
 
     def material_path(self, pid, mid):
