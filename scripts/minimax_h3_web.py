@@ -1812,6 +1812,8 @@ details.sec>summary .editbtn{margin-left:auto}
 @media(min-width:981px){
   .formgrid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:14px;align-items:start}
   .formgrid>.fcol{min-width:0}
+  .formgrid>.fcol:first-child{order:2}
+  .formgrid>.fcol:last-child{order:1}
   .formgrid textarea{min-height:214px}
   .params{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:4px}
   .params>.grid3,.params>.grid2{display:contents}
