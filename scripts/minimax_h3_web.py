@@ -24,6 +24,8 @@ UPLOAD_MAX = 2 * 1024 * 1024 * 1024
 BUSY_WAIT_MAX_S = 6 * 3600
 FPS = 24
 MAX_IMAGES, MAX_VIDEOS, MAX_AUDIOS = 9, 3, 3
+MAX_REFS = 12                       # 全部参考文件（图+视频+音频）合计上限
+MAX_IMAGE_MB, MAX_VIDEO_MB, MAX_AUDIO_MB, MAX_REQUEST_MB = 30, 50, 15, 64
 MEDIA_KINDS = ("ref_image", "ref_video", "ref_audio")
 FRAME_KINDS = ("first_frame", "last_frame")
 MATERIAL_EXTS = {".png": "image", ".jpg": "image", ".jpeg": "image", ".webp": "image",
@@ -1729,6 +1731,10 @@ def make_handler(mgr):
                 if not fp:
                     self._err(400, "素材不存在或已被删除：%s" % mid); return
                 media[kind] = [fp]
+            if mode == "ref2v":
+                ok = self._check_ref_limits(project, ids, media, n)
+                if ok:
+                    self._err(400, ok); return
             seed = _to_int(_first(fields, "seed"), None, lo=0, hi=2**63 - 1)
             if seed is None:
                 seed = random.randint(0, 2**63 - 1)
@@ -1754,6 +1760,34 @@ def make_handler(mgr):
             os.makedirs(mgr._job_dir(jid), exist_ok=True)
             mgr.submit(cfg, jid=jid)
             self._json(202, {"id": jid, "status": "queued"})
+
+        def _check_ref_limits(self, project, ids, media, n):
+            """Validate the MiniMax reference limits; return an error string or None."""
+            total = n["ref_image"] + n["ref_video"] + n["ref_audio"]
+            if total > MAX_REFS:
+                return "参考文件合计最多 %d 个（当前 %d 个）" % (MAX_REFS, total)
+            if n["ref_audio"] and not (n["ref_image"] or n["ref_video"]):
+                return "音频不能单独作为参考，请至少再选 1 张图片或 1 段视频"
+            lim = {"ref_image": MAX_IMAGE_MB, "ref_video": MAX_VIDEO_MB, "ref_audio": MAX_AUDIO_MB}
+            cn = {"ref_image": "图片", "ref_video": "视频", "ref_audio": "音频"}
+            names = {m.get("id"): (m.get("name") or m.get("file") or "")
+                     for m in ((mgr.projects.get(project) or {}).get("materials") or [])}
+            total_bytes = 0
+            for kind in MEDIA_KINDS:
+                for ref, path in zip(ids[kind], media[kind]):
+                    label = os.path.basename(ref[len("clip:"):]) if ref.startswith("clip:") else names.get(ref, ref)
+                    try:
+                        size = os.path.getsize(path)
+                    except OSError:
+                        size = 0
+                    total_bytes += size
+                    if size > lim[kind] * 1048576:
+                        return "%s「%s」%.1fMB，超过 %dMB 上限" % (
+                            cn[kind], label, size / 1048576, lim[kind])
+            if total_bytes > MAX_REQUEST_MB * 1048576:
+                return "参考文件合计 %.1fMB，超过单次请求 %dMB 上限" % (
+                    total_bytes / 1048576, MAX_REQUEST_MB)
+            return None
 
     return H
 
@@ -1859,7 +1893,9 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .modal video{width:100%;max-height:76vh;background:#000;border-radius:8px}
 .opttext{width:100%;min-height:220px;max-height:56vh;background:#0b0e13;color:var(--fg);
        border:1px solid var(--line);border-radius:8px;padding:10px;font-size:13px;line-height:1.5;resize:vertical}
-.optrow{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.optrow{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}
+.optrow b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.optrow button{flex:0 0 auto;white-space:nowrap}
 .optacts{display:flex;gap:8px;margin-top:10px}
 .optacts button.primary,.optacts button.ghost{flex:1 1 0;width:auto;height:38px;margin:0;padding:0 10px;
        display:flex;align-items:center;justify-content:center;box-sizing:border-box}
@@ -1890,9 +1926,13 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .matcard.pick:hover{border-color:var(--acc)}
 .matcard.sel{outline:3px solid var(--acc);outline-offset:-3px}
 .matcard .thumb{grid-area:thumb;width:100%;aspect-ratio:16/9;background:#000;object-fit:cover;display:block}
-.matcard img.thumb{object-fit:contain;background:#0a0c11}
+.matcard img.thumb{object-fit:contain;background:#0a0c11;cursor:zoom-in}
+.matcard video.thumb{cursor:pointer}
 .matcard .thumbicon{grid-area:thumb;width:100%;aspect-ratio:16/9;background:#0a0c11;display:flex;align-items:center;
-        justify-content:center;color:var(--mut);font-size:12px;letter-spacing:.05em}
+        justify-content:center;color:var(--mut);font-size:12px;letter-spacing:.05em;cursor:pointer}
+.viewbody img{display:block;margin:0 auto;max-width:100%;max-height:82vh;border-radius:8px}
+.viewbody video{display:block;width:100%;max-height:82vh;background:#000;border-radius:8px}
+.viewbody audio{width:100%}
 .matcard .mb{grid-area:mb;padding:6px 9px 8px;min-width:0}
 .matcard .nm{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .matcard .mm{font-size:11px;color:var(--mut);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -2166,6 +2206,12 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   <div class="box">
     <video id="mvideo" controls playsinline webkit-playsinline></video>
     <div class="muted" id="mcap" style="margin-top:8px"></div>
+  </div>
+</div>
+<div class="modal" id="viewModal" onclick="if(event.target===this)closeView()">
+  <div class="box" style="width:min(1100px,98vw)">
+    <div class="optrow"><b id="viewCap"></b><button class="ghost" onclick="closeView()">关闭</button></div>
+    <div id="viewBody" class="viewbody"></div>
   </div>
 </div>
 <div class="modal" id="optModal" onclick="if(event.target===this)closeOpt()">
@@ -2696,6 +2742,11 @@ function renderMaterials(){
       const d=document.createElement('div'); d.className='matcard';
       d.innerHTML=matPreview(m,pid)+'<div class="mb"><div class="nm" title="'+esc(m.name)+'">'+esc(m.name)+'</div>'+
         '<div class="mm">'+MAT_KIND_CN[m.kind]+' · '+fmtSize(m.size)+(m.exists?'':' · 文件缺失')+'</div></div>';
+      if(m.exists){
+        const prev=d.firstElementChild;
+        if(m.kind==='image'){ prev.title='双击查看大图'; prev.addEventListener('dblclick',()=>viewMaterial(m.id)); }
+        else{ prev.title=(m.kind==='video'?'单击放大播放':'单击播放'); prev.addEventListener('click',()=>viewMaterial(m.id)); }
+      }
       const ma=document.createElement('div'); ma.className='ma';
       const rm=document.createElement('button'); rm.textContent='删除'; rm.onclick=()=>deleteMaterial(m.id);
       ma.appendChild(rm); d.appendChild(ma);
@@ -2838,6 +2889,35 @@ function pickOk(){
 }
 function closePick(){ $('pickModal').classList.remove('open'); pickKind=null; pickSel=new Set(); }
 
+// selected reference files for one slot, with byte sizes (materials + products)
+function refFiles(kind){
+  const mats=slotItems(kind).filter(it=>it.src==='mat').map(it=>matById(it.id)).filter(Boolean)
+    .map(m=>({name:m.name,size:m.size||0}));
+  const clips=slotItems(kind).filter(it=>it.src==='clip').map(it=>clipsCache.find(c=>c.rel===it.rel)).filter(Boolean)
+    .map(c=>({name:c.shot||c.name,size:c.size||0}));
+  return mats.concat(clips);
+}
+// MiniMax reference limits; returns an error string or ''
+function checkRefLimits(){
+  const groups=[['ref_image','图片',30],['ref_video','视频',50],['ref_audio','音频',15]];
+  const files=groups.map(([k])=>refFiles(k));
+  const total=files.reduce((a,f)=>a+f.length,0);
+  if(total>12) return '参考文件合计最多 12 个（当前 '+total+' 个）';
+  if(files[2].length && !files[0].length && !files[1].length)
+    return '音频不能单独作为参考，请至少再选 1 张图片或 1 段视频';
+  let totalBytes=0;
+  for(let i=0;i<groups.length;i++){
+    const cn=groups[i][1], lim=groups[i][2];
+    for(const f of files[i]){
+      totalBytes+=f.size;
+      if(f.size>lim*1048576)
+        return cn+'「'+f.name+'」'+(f.size/1048576).toFixed(1)+'MB，超过 '+lim+'MB 上限';
+    }
+  }
+  if(totalBytes>64*1048576) return '参考文件合计 '+(totalBytes/1048576).toFixed(1)+'MB，超过单次请求 64MB 上限';
+  return '';
+}
+
 function onModeChange(){
   const m=$('mode').value, ref=(m==='ref2v');
   $('t2vBox').style.display = ref? 'none':'';
@@ -2859,6 +2939,8 @@ async function submit(){
     const imgs=selMat.ref_image, vids=selMat.ref_video.length+selClip.ref_video.length,
           auds=selMat.ref_audio;
     if(!imgs.length && !vids && !auds.length){ notice('请至少选择一个参考素材'); return; }
+    const limErr=checkRefLimits();
+    if(limErr){ notice(limErr,'参考素材超限'); return; }
     media=[imgs.length?imgs.length+'图':null, vids?vids+'视频':null,
            auds.length?auds.length+'音频':null].filter(Boolean).join(' / ');
   }else{
@@ -3222,6 +3304,24 @@ async function editTick(){
 function play(rel){ $('mvideo').src='/files/'+encodeURI(rel); $('mcap').textContent=rel;
   $('modal').classList.add('open'); $('mvideo').play().catch(()=>{}); }
 function closeModal(){ $('mvideo').pause(); $('mvideo').src=''; $('modal').classList.remove('open'); }
+
+function viewMaterial(mid){
+  const m=matById(mid); if(!m) return;
+  if(!m.exists){ notice('素材文件缺失：'+m.name); return; }
+  const u=matUrl(curProject,m.file);
+  const h = m.kind==='image' ? '<img src="'+u+'">'
+          : m.kind==='video' ? '<video controls autoplay playsinline src="'+u+'"></video>'
+          : '<audio controls autoplay src="'+u+'"></audio>';
+  $('viewCap').textContent=m.name+' · '+MAT_KIND_CN[m.kind];
+  $('viewBody').innerHTML=h;
+  $('viewBody').querySelectorAll('video,audio').forEach(o=>o.play().catch(()=>{}));
+  $('viewModal').classList.add('open');
+}
+function closeView(){
+  const b=$('viewBody');
+  b.querySelectorAll('video,audio').forEach(o=>{ o.pause(); o.removeAttribute('src'); if(o.load) o.load(); });
+  b.innerHTML=''; $('viewModal').classList.remove('open');
+}
 
 async function releaseVram(){
   const ok=await askConfirm('停止 ComfyUI 并释放显存？下次生成需冷启动。','释放显存','停止');
