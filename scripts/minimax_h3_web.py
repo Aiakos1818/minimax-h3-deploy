@@ -2344,7 +2344,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     <div class="statgrid">
       <div class="card" id="matCard">
         <div class="matcardhead"><span>素材库 <span class="muted" id="matSub"></span></span>
-          <button class="ghost" style="margin-left:auto;padding:3px 10px;font-size:12.5px" onclick="openImageCreator()">创作图片素材</button></div>
+          <button class="ghost" style="margin-left:auto;padding:3px 10px;font-size:12.5px" onclick="openImageCreator()">创作图片</button></div>
         <input id="matAddFile" type="file" style="display:none" onchange="onMatAddPick()">
         <div class="muted" id="matMsg" style="margin-top:6px"></div>
         <div id="matGrid" class="matgroups"></div>
@@ -2600,7 +2600,7 @@ function renderProjHead(){
   $('projHead').innerHTML='<div class="cardhead"><h2 style="color:var(--fg);font-size:16px">'+esc(p.name)+'</h2>'+
     '<span class="bcbar">'+bcbar+'</span></div>'+
     '<div class="projsub"><span class="muted">'+esc(sub)+'</span>'+
-      (creator?'<button class="ghost" onclick="addImageMaterial()">创作图片素材</button>'
+      (creator?'<button class="ghost" onclick="addImageMaterial()">创作图片</button>'
               :'<button class="ghost" onclick="addShot()">添加分镜</button>')+'</div>';
 }
 function openProject(pid){ location.hash='#/p/'+encodeURIComponent(pid); }
@@ -3153,7 +3153,7 @@ function closeImageCreator(){
 }
 function addImageMaterial(){
   if(!curProject){ notice('请先进入一个项目'); return; }
-  openShotModal('创作图片素材','','确定',(name)=>{ imgName=name; showImgForm(); },'image');
+  openShotModal('创作图片','','确定',(name)=>{ imgName=name; showImgForm(); },'image');
 }
 function showImgForm(){
   $('imgTaskCard').style.display='';
@@ -3288,7 +3288,7 @@ function prefillImageForm(m){
 }
 async function submitImage(){
   if(!curProject){ notice('请先进入一个项目'); return; }
-  if(!imgName){ notice('请先创作图片素材并填写素材名'); return; }
+  if(!imgName){ notice('请先创作图片并填写素材名'); return; }
   const mode=($('imgMode').value==='i2i')?'i2i':'t2i';
   const body={project:curProject, name:imgName, mode};
   if(mode==='i2i'){
