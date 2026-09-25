@@ -812,8 +812,13 @@ textarea{min-height:96px;resize:vertical}
 .filebox{border:1px dashed var(--line);border-radius:8px;padding:8px;margin-top:4px}
 .filebox .hint{font-size:12px;color:var(--mut)}
 .filebox ul{list-style:none;margin:6px 0 0;padding:0;font-size:12px;color:var(--fg)}
-.filebox li{display:flex;justify-content:space-between;gap:8px;padding:2px 0;border-bottom:1px dotted var(--line)}
-.filebox li button{background:none;border:0;color:var(--err);cursor:pointer;font-size:12px}
+.filebox li{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:3px 0;border-bottom:1px dotted var(--line)}
+.filebox li .fname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.filebox li .acts{display:flex;gap:6px;flex:0 0 auto}
+.filebox li button.rm{background:none;border:0;color:var(--err);cursor:pointer;font-size:12px}
+.filebox li button.chip{background:#22324d;color:#bcd4ff;border:1px solid #33507d;border-radius:999px;
+       padding:1px 9px;font-size:12px;cursor:pointer}
+.filebox li button.chip:active{background:#2f4a6e}
 button.primary{width:100%;margin-top:14px;padding:12px;border:0;border-radius:9px;background:var(--acc);
        color:#fff;font-size:15px;font-weight:600;cursor:pointer}
 button.primary:disabled{opacity:.5;cursor:default}
@@ -868,7 +873,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   <div>
     <div class="card">
       <h2>新建任务</h2>
-      <label>提示词（用 &lt;Picture 1&gt; / &lt;Video 1&gt; / &lt;Audio 1&gt; 引用素材）</label>
+      <label>提示词（点下方素材后的「图片1 / 视频1 / 音频1」按钮即可插入 &lt;Picture 1&gt; 等引用）</label>
       <textarea id="prompt" placeholder="Cinematic shot of the subject in <Picture 1> ..."></textarea>
       <label>参考图（≤9）</label>
       <div class="filebox"><input id="fImg" type="file" accept="image/*" multiple><ul id="lImg"></ul></div>
@@ -983,21 +988,43 @@ $('aspect').value = ASPECTS[0];
 function fmtSize(n){ if(n>1048576) return (n/1048576).toFixed(1)+'MB'; if(n>1024) return (n/1024).toFixed(0)+'KB'; return n+'B'; }
 function stCls(s){ return 'st '+s; }
 
-function bindFiles(inputId, listId, max, kinds){
+function insertRef(prefix, idx){
+  const ta=$('prompt'), tag='<'+prefix+' '+(idx+1)+'>';
+  const s=ta.selectionStart??ta.value.length, e=ta.selectionEnd??s;
+  ta.value=ta.value.slice(0,s)+tag+ta.value.slice(e);
+  const pos=s+tag.length; ta.focus(); ta.setSelectionRange(pos,pos);
+}
+function bindFiles(inputId, listId, max, cn, prefix){
   const input=$(inputId), list=$(listId); let files=[];
   function render(){
     list.innerHTML='';
-    files.forEach((f,i)=>{ const li=document.createElement('li');
-      li.innerHTML='<span>'+f.name+'</span>'; const b=document.createElement('button'); b.textContent='移除';
-      b.onclick=()=>{files.splice(i,1); input.value=''; render();}; li.appendChild(b); list.appendChild(li); });
-    if(files.length>max){ $('submitMsg').textContent = kinds+' 超过上限 '+max; }
+    files.forEach((f,i)=>{
+      const li=document.createElement('li');
+      const nm=document.createElement('span'); nm.className='fname'; nm.textContent=f.name;
+      const acts=document.createElement('span'); acts.className='acts';
+      const chip=document.createElement('button'); chip.className='chip'; chip.textContent=cn+(i+1);
+      chip.title='插入引用 <'+prefix+' '+(i+1)+'>';
+      chip.onclick=()=>insertRef(prefix,i);
+      const rm=document.createElement('button'); rm.className='rm'; rm.textContent='移除';
+      rm.onclick=()=>{files.splice(i,1); input.value=''; render();};
+      acts.appendChild(chip); acts.appendChild(rm);
+      li.appendChild(nm); li.appendChild(acts); list.appendChild(li);
+    });
   }
-  input.onchange=()=>{ files = Array.from(input.files).slice(0,max); render(); };
+  input.onchange=()=>{
+    for(const f of Array.from(input.files)){
+      if(files.length>=max){ $('submitMsg').textContent=cn+' 最多 '+max+' 个'; break; }
+      const dup=files.some(x=>x.name===f.name&&x.size===f.size&&x.lastModified===f.lastModified);
+      if(!dup) files.push(f);
+    }
+    input.value='';            // allow picking the same file again / keep appending
+    render();
+  };
   return ()=>files;
 }
-const getImg = bindFiles('fImg','lImg',9,'参考图');
-const getVid = bindFiles('fVid','lVid',3,'参考视频');
-const getAud = bindFiles('fAud','lAud',3,'参考音频');
+const getImg = bindFiles('fImg','lImg',9,'图片','Picture');
+const getVid = bindFiles('fVid','lVid',3,'视频','Video');
+const getAud = bindFiles('fAud','lAud',3,'音频','Audio');
 
 function submit(){
   const prompt=$('prompt').value.trim();
