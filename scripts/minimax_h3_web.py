@@ -2145,6 +2145,9 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
   .headacts{margin-top:8px}
   .headacts button{flex:1 1 0;width:auto;min-width:0;height:42px;padding:0;font-size:15px}
   .headacts button.primary{width:auto;padding:0;font-size:15px}
+  #imgT2I>.formgrid,#imgI2I>.formgrid{display:flex;flex-direction:column}
+  #imgT2I>.formgrid>.fcol:first-child,#imgI2I>.formgrid>.fcol:first-child{order:2}
+  #imgT2I>.formgrid>.fcol:last-child,#imgI2I>.formgrid>.fcol:last-child{order:1}
 }
 @media(max-width:640px){.grid3{grid-template-columns:1fr 1fr}textarea,input,select{font-size:16px}
   .hdrright{margin-left:0}
@@ -2154,6 +2157,8 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
   .cardhead.modehead{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   .cardhead.modehead #mode{width:100%;min-width:0}
   .formgrid>.fcol:last-child{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
+  #imgT2I>.formgrid>.fcol:first-child,#imgI2I>.formgrid>.fcol:first-child{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
+  #imgT2I>.formgrid>.fcol:last-child,#imgI2I>.formgrid>.fcol:last-child{border-top:0;margin-top:0;padding-top:0}
   .params{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
   #taskCard>.headacts{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
   #imgTaskCard>.headacts{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
