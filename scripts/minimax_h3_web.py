@@ -1407,6 +1407,16 @@ details.sec>summary .editbtn{margin-left:auto}
     </div>
   </div>
 </div>
+<div class="modal" id="inputModal" onclick="if(event.target===this)inputResolve(null)">
+  <div class="box" style="width:min(420px,96vw)">
+    <div class="optrow"><b id="inputTitle">输入</b><button class="ghost" onclick="inputResolve(null)">关闭</button></div>
+    <input id="inputVal" onkeydown="if(event.key==='Enter'){event.preventDefault();inputResolve($('inputVal').value)}">
+    <div class="optacts">
+      <button class="ghost" onclick="inputResolve(null)">取消</button>
+      <button class="primary" id="inputOk" onclick="inputResolve($('inputVal').value)">确定</button>
+    </div>
+  </div>
+</div>
 <script>
 const $ = (id)=>document.getElementById(id);
 const esc = (s)=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -1461,10 +1471,11 @@ function route(){
   const m=location.hash.match(/^#\/p\/(.+)$/);
   const pid=m?decodeURIComponent(m[1]):null;
   if(pid && projNames[pid]!==undefined){
-    if(curProject!==pid){ curProject=pid; $('jobs')._sig=''; $('clips')._sig='';
-      jobsById={}; lastJob=null; logOffset=0; $('log').textContent='';
-      if(clipEdit){ clipEdit=false; clipSel.clear(); $('clipBar').style.display='none';
-        $('clipEditBtn').textContent='编辑'; } }
+    if(curProject!==pid){ curProject=pid;
+      $('jobs')._sig=null; $('jobs').innerHTML='';
+      $('clips')._sig=null; $('clips').innerHTML='';
+      jobsById={}; clipsCache=[]; clipSel.clear(); lastJob=null; logOffset=0; $('log').textContent='';
+      if(clipEdit){ clipEdit=false; $('clipBar').style.display='none'; $('clipEditBtn').textContent='编辑'; } }
     $('homeView').style.display='none'; $('projView').style.display='';
     renderProjHead(); refreshJobs(); refreshOutputs();
   }else{
@@ -1485,7 +1496,8 @@ async function newProject(){
 }
 async function renameProject(){
   const p=projects.find(x=>x.id===curProject); if(!p) return;
-  const name=prompt('项目名称',p.name); if(name==null) return;
+  const name=await askInput('重命名项目',p.name,'保存','项目名称');
+  if(name==null) return;
   const r=await fetch('/api/projects/'+encodeURIComponent(curProject)+'/rename',{method:'POST',
     headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
   const j=await r.json().catch(()=>({}));
@@ -1529,6 +1541,19 @@ function askConfirm(msg,title,okText){
   });
 }
 function askResolve(v){ $('askModal').classList.remove('open'); const cb=askCb; askCb=null; if(cb) cb(v); }
+let inputCb=null;
+function askInput(title,value,okText,ph){
+  return new Promise(res=>{
+    inputCb=res;
+    $('inputTitle').textContent=title||'输入';
+    $('inputOk').textContent=okText||'确定';
+    $('inputVal').value=value||'';
+    $('inputVal').placeholder=ph||'';
+    $('inputModal').classList.add('open');
+    setTimeout(()=>{ $('inputVal').focus(); $('inputVal').select(); },50);
+  });
+}
+function inputResolve(v){ $('inputModal').classList.remove('open'); const cb=inputCb; inputCb=null; if(cb) cb(v); }
 function friendlyErr(e){
   if(!e) return '';
   if(/runner exited rc=/.test(e)) return '生成进程异常退出';
@@ -1773,7 +1798,10 @@ async function refreshJobs(){
   });
 }
 
-function jobAct(id,act){ if(!confirm(act==='cancel'?'取消任务 '+id+'?':'删除记录 '+id+'?')) return;
+async function jobAct(id,act){
+  const ok=await askConfirm((act==='cancel'?'取消任务 ':'删除记录 ')+'<b>'+id+'</b>？',
+                            act==='cancel'?'取消任务':'删除记录', act==='cancel'?'取消':'删除');
+  if(!ok) return;
   fetch('/api/jobs/'+id+'/'+act,{method:'POST'}).then(()=>{refreshJobs();refreshOutputs();}); }
 
 async function refreshOutputs(){
@@ -1798,11 +1826,27 @@ async function refreshOutputs(){
 }
 
 function updClipBar(){ $('clipCount').textContent='已选 '+clipSel.size; }
+function applyClipEditUI(){
+  $('clips').querySelectorAll('.clip').forEach(el=>{
+    if(clipEdit){
+      if(!el.querySelector('.pick')){
+        const pk=document.createElement('span'); pk.className='pick';
+        el.insertBefore(pk, el.firstChild);
+      }
+      const on=clipSel.has(el.dataset.rel);
+      el.classList.toggle('sel',on);
+      el.querySelector('.pick').textContent=on?'\u2713':'';
+    }else{
+      const pk=el.querySelector('.pick'); if(pk) pk.remove();
+      el.classList.remove('sel');
+    }
+  });
+}
 function toggleClipEdit(){
   clipEdit=!clipEdit; clipSel.clear();
   $('clipBar').style.display=clipEdit?'flex':'none';
   $('clipEditBtn').textContent=clipEdit?'完成':'编辑';
-  $('clips')._sig=''; refreshOutputs(); updClipBar();
+  applyClipEditUI(); updClipBar();
 }
 function toggleClip(rel,el){
   if(clipSel.has(rel)) clipSel.delete(rel); else clipSel.add(rel);
@@ -1820,6 +1864,14 @@ function syncClipSel(){
 }
 function clipSelectAll(){ clipsCache.forEach(c=>clipSel.add(c.rel)); syncClipSel(); }
 function clipSelectNone(){ clipSel.clear(); syncClipSel(); }
+function removeClipsLocal(rels){
+  const gone=new Set(rels);
+  $('clips').querySelectorAll('.clip').forEach(el=>{ if(gone.has(el.dataset.rel)) el.remove(); });
+  clipsCache=clipsCache.filter(c=>!gone.has(c.rel));
+  const box=$('clips');
+  if(!clipsCache.length) box.innerHTML='<span class="muted">暂无产物</span>';
+  box._sig=clipsCache.map(c=>c.rel+'|'+c.size).join('\n');
+}
 async function clipDelete(){
   const rels=[...clipSel];
   if(!rels.length){ alert('请先选择要删除的产物'); return; }
@@ -1830,14 +1882,18 @@ async function clipDelete(){
   const j=await r.json().catch(()=>({}));
   if(!r.ok){ alert('删除失败：'+(j.error||r.status)); return; }
   clipSel.clear(); updClipBar();
-  $('clips')._sig=''; refreshOutputs(); refreshProjects(); refreshJobs();
+  removeClipsLocal(rels);
+  if(!clipsCache.length) toggleClipEdit();
+  refreshProjects(); refreshJobs();
 }
 
 function play(rel){ $('mvideo').src='/files/'+encodeURI(rel); $('mcap').textContent=rel;
   $('modal').classList.add('open'); $('mvideo').play().catch(()=>{}); }
 function closeModal(){ $('mvideo').pause(); $('mvideo').src=''; $('modal').classList.remove('open'); }
 
-function releaseVram(){ if(!confirm('停止 ComfyUI 并释放显存? 下次生成需冷启动。')) return;
+async function releaseVram(){
+  const ok=await askConfirm('停止 ComfyUI 并释放显存？下次生成需冷启动。','释放显存','停止');
+  if(!ok) return;
   fetch('/api/service/stop',{method:'POST'}).then(async r=>{ const j=await r.json(); alert(j.msg||'ok'); refreshState(); }); }
 
 async function optimizePrompt(){
