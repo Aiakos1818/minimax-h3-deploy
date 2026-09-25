@@ -283,6 +283,21 @@ class ComfyHealth:
         except Exception:
             return None
 
+    def interrupt(self):
+        """Ask ComfyUI to interrupt the current prompt and clear its pending queue."""
+        try:
+            req = urllib.request.Request(self.base + "/interrupt", data=b"", method="POST")
+            urllib.request.urlopen(req, timeout=3).read()
+        except Exception:
+            pass
+        try:
+            data = json.dumps({"clear": True}).encode("utf-8")
+            req = urllib.request.Request(self.base + "/queue", data=data, method="POST",
+                                         headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=3).read()
+        except Exception:
+            pass
+
 
 _STAGE_PATTERNS = [
     (r"\[resident\] reusing service", "复用常驻服务(免冷启动)"),
@@ -891,7 +906,33 @@ class Manager:
                 return True, "已取消(排队中)"
             job["st"]["cancel_requested"] = True
             self._term(job)
-            return True, "已发送取消"
+        self.comfy.interrupt()
+        return True, "已发送取消"
+
+    def retry(self, jid):
+        """Re-queue a finished/failed/cancelled job with its stored parameters."""
+        with self.lock:
+            job = self.jobs.get(jid)
+            if not job:
+                return False, "不存在"
+            st = job["st"]
+            if st.get("status") in ("running", "queued"):
+                return False, "分镜已在队列中"
+            cfg = job.get("cfg")
+            if not cfg or not cfg.get("params"):
+                return False, "缺少参数，无法重新生成"
+            for k in ("progress", "detail", "clip_rel", "clip_size", "clip_frames",
+                      "clip_seconds", "duration", "ended", "err"):
+                st.pop(k, None)
+            st.update(status="queued", created=NOW(), created_ts=time.time(),
+                      stage=None, cancel_requested=False, tag=jid)
+            cfg["tag"] = jid
+            self.persist_cfg(job)
+            self.persist_status(job)
+            self.queue.append(jid)
+            with self._cv:
+                self._cv.notify()
+        return True, "已重新提交生成"
 
     def delete(self, jid):
         with self.lock:
@@ -1480,10 +1521,13 @@ def make_handler(mgr):
             if not self._authed():
                 return
             u = urlparse(self.path)
-            m = re.match(r"^/api/jobs/([^/]+)/(cancel|delete)$", u.path)
+            m = re.match(r"^/api/jobs/([^/]+)/(cancel|delete|retry)$", u.path)
             if m:
                 jid, action = m.group(1), m.group(2)
-                ok, msg = (mgr.cancel(jid) if action == "cancel" else mgr.delete(jid))
+                if action == "retry":
+                    ok, msg = mgr.retry(jid)
+                else:
+                    ok, msg = (mgr.cancel(jid) if action == "cancel" else mgr.delete(jid))
                 self._json(200 if ok else 409, {"ok": ok, "msg": msg}); return
             pm = re.match(r"^/api/projects/([^/]+)/(rename|delete)$", u.path)
             if pm:
@@ -1806,6 +1850,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
         background:linear-gradient(100deg,#12161d 30%,#1c2431 50%,#12161d 70%);
         background-size:200% 100%;animation:phshim 1.4s linear infinite}
 .jthumb.ph>i{position:absolute;left:0;bottom:0;height:3px;background:var(--acc);transition:width .3s}
+.jthumb.ph.static{animation:none;background:#0e1116}
 @keyframes phshim{0%{background-position:100% 0}100%{background-position:-100% 0}}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;align-items:center;justify-content:center;z-index:20;padding:12px}
 .modal.open{display:flex}
@@ -2960,6 +3005,8 @@ async function refreshJobs(){
     let acts='<button class="ghost" onclick="showJob(\''+j.id+'\')">详情</button> ';
     if(j.status==='queued'||j.status==='running') acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'cancel\')">取消</button>';
     else acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'delete\')">删除</button>';
+    if(j.status==='cancelled'||j.status==='failed'||j.status==='interrupted')
+      acts+=' <button class="ghost" onclick="retryJob(\''+j.id+'\')">生成</button>';
     if(j.clip_rel) acts+=' <button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看</button>';
     acts+=' <button class="ghost" onclick="reuseJob(\''+j.id+'\')">复用</button>';
     let thumb='';
@@ -2970,6 +3017,8 @@ async function refreshJobs(){
       const pct=(j.status==='running'&&j.progress&&j.progress.total)
         ? Math.round(j.progress.cur/j.progress.total*100) : 0;
       thumb='<div class="jthumb ph" title="'+(STATUS_CN[j.status]||j.status)+'"><i style="width:'+pct+'%"></i></div>';
+    }else{
+      thumb='<div class="jthumb ph static" title="'+(STATUS_CN[j.status]||j.status)+'"></div>';
     }
     const head = j.name
       ? '<b>'+esc(j.name)+'</b><br><span class="muted">'+esc(j.id)+'</span>'
@@ -2982,13 +3031,19 @@ async function refreshJobs(){
   });
 }
 
+async function retryJob(id){
+  const r=await fetch('/api/jobs/'+id+'/retry',{method:'POST'});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){ notice('生成失败：'+(j.msg||j.error||r.status)); return; }
+  refreshJobs(); refreshProjects();
+}
 async function jobAct(id,act){
   const isDel=act!=='cancel';
   const j=jobsById[id]||{};
   const label=esc(j.name||id)+(j.name?' <span class="muted">'+id+'</span>':'');
   const ok=await askConfirm((isDel?'删除分镜 ':'取消分镜 ')+'<b>'+label+'</b>？'+
                             (isDel?'<br>将同时删除其产物视频，不可恢复。':''),
-                            isDel?'删除分镜':'取消分镜', isDel?'删除':'取消');
+                            isDel?'删除分镜':'取消分镜', isDel?'删除':'确定');
   if(!ok) return;
   fetch('/api/jobs/'+id+'/'+act,{method:'POST'}).then(()=>{refreshJobs();refreshOutputs();refreshProjects();}); }
 
