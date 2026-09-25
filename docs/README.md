@@ -14,11 +14,13 @@ MiniMax-H3 双 RTX 2080 Ti 22G（NVLink）raylight TP 部署的工作节点文�
 | 5 | [chain_director_v2.md](chain_director_v2.md) | `chain_director_v2_web.py` | 局域网 Web 控制台（`:8189`，stdlib-only）：参数镜像 + 上传 + 串行队列 + 续拍 + 在线预览 | 现行（v2/ref2va） |
 | 6 | [chain_director_v3.md](chain_director_v3.md) | `chain_director_v3.py` | 常驻 UNet 链：段间零 FSDP 重载、服务默认常驻、int4 CLIP 按需上下卡、首段 fl2va | **现行主线** |
 | 7 | [chain_director_v3.md](chain_director_v3.md) | `chain_director_v3_web.py` | 局域网 Web 控制台（`:8190`，独立数据目录 `.h3web_v3/`），驱动 v3 | 现行 |
+| 8 | [minimax_h3_web.md](minimax_h3_web.md) | `minimax_h3_web.py` | MiniMax H3 Web 控制台（`:8191`，数据目录 `.h3ref2v/`）：项目制 t2v/ref2v + 提示词优化 + 串行队列 + **剪辑时间线成片** | **现行（推荐）** |
 | — | [audio.md](audio.md) | —（横切所有阶段） | H3 音频专项：表示与通路、段间 audio 连接、`--ref-audio`/`cond_audio` 引导、**首段底噪现象调查**（steps 收敛结论） | 现行 |
 
 ## 快速入口
 
-- **当前推荐做法**：`chain_director_v3.py`（常驻 UNet 链），见 [chain_director_v3.md](chain_director_v3.md)；需要 ref2va 参考素材时用 `chain_director_v2.py`。
+- **Web 控制台（推荐）**：`minimax_h3_web.py`（`:8191`，项目制、t2v/ref2v、提示词优化、剪辑成片），见 [minimax_h3_web.md](minimax_h3_web.md)。
+- **命令行/链式生成**：`chain_director_v3.py`（常驻 UNet 链），见 [chain_director_v3.md](chain_director_v3.md)；需要 ref2va 参考素材时用 `chain_director_v2.py`。
 - **音频踩坑/底噪结论**：见 [audio.md](audio.md)（立体声 2ch/32kHz、8 步弱场景易出噪声态、弱音频 prompt 用 `--steps 20`）。
 - **双卡部署版本锁与踩坑**（ComfyUI `30bdda1`、xfuser 0.4.5、NCCL cu13、SM75 Sage 编译法、内存三律）：并入 [gen_dual.md](gen_dual.md)。
 
@@ -43,8 +45,9 @@ MiniMax-H3 双 RTX 2080 Ti 22G（NVLink）raylight TP 部署的工作节点文�
 ├── docs/                       # 本文档集
 ├── vendor/SageAttention2_Optimized_Test/   # SM75 Sage 源码（编译产物 dist/*.whl）
 ├── cond_cache/                 # CLIP cond 磁盘缓存（可 rm -rf）
-├── output/                     # 产物：video/chain/<tag>/、h3_continuous/chain_*.safetensors、final_<tag>.mp4
-├── .h3web/ .h3web_v3/          # 两个 web 控制台的数据目录
+├── output/                     # 产物：<项目id>/<t2v|ref2v|edit>/<jid>.mp4（旧 video/chain/... 仍在）
+├── .h3web/ .h3web_v3/          # 旧 web 控制台（:8189/:8190）的数据目录
+├── .h3ref2v/                   # MiniMax H3 Web（:8191）的数据目录：projects/ jobs/
 └── comfyenv 在 ComfyUI 侧       # ~/ComfyUI-Deploy/comfyenv
 
 ~/ComfyUI-Deploy/               # ComfyUI 引擎（独立仓库，分支 h3-sm75-deploy）

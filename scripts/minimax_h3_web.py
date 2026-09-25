@@ -12,7 +12,7 @@ Usage:
   ~/ComfyUI-Deploy/comfyenv/bin/python scripts/minimax_h3_web.py --start|--stop|--status
 Default: http://0.0.0.0:8191/   data: <root>/.h3ref2v/   log: <root>/minimax_h3_web.log
 """
-import argparse, base64, glob, json, mimetypes, os, random, re, shutil, signal
+import argparse, base64, glob, html, json, mimetypes, os, random, re, shutil, signal
 import subprocess, sys, threading, time, uuid, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote, quote
@@ -983,6 +983,101 @@ class Manager:
             job["st"]["progress"] = {"cur": prog[0], "total": prog[1]}
 
 
+# ------------------------------------------------------- help (doc + videos)
+HELP_DOC_NAME = "minimax_h3_web.md"
+HELP_VIDEO_TITLES = {
+    "videoA-t2v.mp4": "文生视频 + 提示词优化",
+    "videoB-edit.mp4": "剪辑成片（时间线）",
+}
+
+
+def help_doc_path(root):
+    return os.path.join(root, "docs", HELP_DOC_NAME)
+
+
+def help_media_dirs(root):
+    """Videos ship next to the docs; fall back to the demo download dir."""
+    return [os.path.join(root, "docs", "media"),
+            os.path.join(os.path.expanduser("~"), "Downloads", "minimax-h3-demo")]
+
+
+def help_videos(root):
+    seen, out = set(), []
+    for d in help_media_dirs(root):
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for fn in names:
+            if fn.lower().endswith((".mp4", ".webm")) and fn not in seen:
+                seen.add(fn)
+                out.append({"name": fn,
+                            "title": HELP_VIDEO_TITLES.get(fn, os.path.splitext(fn)[0])})
+    return out
+
+
+def _md_inline(s):
+    s = html.escape(s, quote=False)
+    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
+    s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)",
+               r'<a href="\2" target="_blank" rel="noopener">\1</a>', s)
+    return s
+
+
+def md_to_html(text):
+    """Tiny markdown subset -> HTML (headings, lists, tables, code, quotes)."""
+    lines, out, i, n = text.split("\n"), [], 0, len(text.split("\n"))
+    while i < n:
+        line = lines[i]
+        if line.lstrip().startswith("```"):
+            i += 1
+            buf = []
+            while i < n and not lines[i].lstrip().startswith("```"):
+                buf.append(html.escape(lines[i])); i += 1
+            i += 1
+            out.append("<pre><code>" + "\n".join(buf) + "</code></pre>")
+            continue
+        if re.match(r"^\s*\|.*\|\s*$", line) and i + 1 < n \
+                and re.match(r"^\s*\|[\s:|-]+\|\s*$", lines[i + 1]):
+            head = [c.strip() for c in line.strip().strip("|").split("|")]
+            i += 2
+            rows = []
+            while i < n and re.match(r"^\s*\|.*\|\s*$", lines[i]):
+                rows.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
+                i += 1
+            h = "".join("<th>%s</th>" % _md_inline(c) for c in head)
+            body = "".join("<tr>%s</tr>" % "".join("<td>%s</td>" % _md_inline(c) for c in r)
+                           for r in rows)
+            out.append("<table><thead><tr>%s</tr></thead><tbody>%s</tbody></table>" % (h, body))
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if m:
+            lv = len(m.group(1))
+            out.append("<h%d>%s</h%d>" % (lv, _md_inline(m.group(2)), lv)); i += 1; continue
+        if re.match(r"^\s*([-*_])\s*\1\s*\1", line):
+            out.append("<hr>"); i += 1; continue
+        if re.match(r"^\s*[-*]\s+", line):
+            buf = []
+            while i < n and re.match(r"^\s*[-*]\s+", lines[i]):
+                buf.append("<li>%s</li>" % _md_inline(re.sub(r"^\s*[-*]\s+", "", lines[i]))); i += 1
+            out.append("<ul>%s</ul>" % "".join(buf)); continue
+        if re.match(r"^\s*\d+\.\s+", line):
+            buf = []
+            while i < n and re.match(r"^\s*\d+\.\s+", lines[i]):
+                buf.append("<li>%s</li>" % _md_inline(re.sub(r"^\s*\d+\.\s+", "", lines[i]))); i += 1
+            out.append("<ol>%s</ol>" % "".join(buf)); continue
+        if line.strip().startswith(">"):
+            buf = []
+            while i < n and lines[i].strip().startswith(">"):
+                buf.append(_md_inline(lines[i].strip()[1:].strip())); i += 1
+            out.append("<blockquote>%s</blockquote>" % "<br>".join(buf)); continue
+        if not line.strip():
+            i += 1; continue
+        out.append("<p>%s</p>" % _md_inline(line)); i += 1
+    return "\n".join(out)
+
+
 # ------------------------------------------------------------------- handler
 _OUTPUT_RE = re.compile(r"^/files/(.+)$")
 
@@ -1086,6 +1181,31 @@ def make_handler(mgr):
                 self._err(404, "file not found"); return
             self._send_file_range(cand, force_dl)
 
+        def _serve_help_doc(self):
+            try:
+                with open(help_doc_path(mgr.root), encoding="utf-8") as f:
+                    md = f.read()
+            except OSError:
+                self._err(404, "help doc not found"); return
+            body = md_to_html(md).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def _serve_help_video(self, name):
+            name = unquote(name)
+            if not name or name != os.path.basename(name) or "/" in name or "\\" in name:
+                self._err(400, "bad name"); return
+            for d in help_media_dirs(mgr.root):
+                p = os.path.join(d, name)
+                if os.path.isfile(p):
+                    self._send_file_range(p); return
+            self._err(404, "video not found")
+
         def do_GET(self):
             if not self._authed():
                 return
@@ -1098,6 +1218,13 @@ def make_handler(mgr):
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(body)
+            elif u.path == "/api/help":
+                self._json(200, {"doc": os.path.isfile(help_doc_path(mgr.root)),
+                                 "videos": help_videos(mgr.root)})
+            elif u.path == "/help/doc":
+                self._serve_help_doc()
+            elif u.path.startswith("/help/video/"):
+                self._serve_help_video(u.path[len("/help/video/"):])
             elif u.path == "/api/state":
                 self._json(200, mgr.state())
             elif u.path == "/api/projects":
@@ -1489,6 +1616,24 @@ details.sec>summary .editbtn{margin-left:auto}
        padding:2px 8px;font-size:12px;cursor:pointer;z-index:1}
 @media(max-width:980px){.cols{grid-template-columns:1fr}}
 @media(max-width:640px){.grid3{grid-template-columns:1fr 1fr}textarea,input,select{font-size:16px}}
+.docbody{color:var(--fg);font-size:14px;line-height:1.68}
+.docbody h1{font-size:22px;margin:4px 0 12px}
+.docbody h2{font-size:18px;margin:20px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.docbody h3{font-size:15px;margin:14px 0 6px}
+.docbody p{margin:8px 0}
+.docbody ul,.docbody ol{margin:8px 0 8px 22px}
+.docbody li{margin:3px 0}
+.docbody code{background:#0a0c11;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12.5px}
+.docbody pre{background:#0a0c11;border:1px solid var(--line);border-radius:8px;padding:10px 12px;overflow:auto}
+.docbody pre code{border:0;padding:0;background:none}
+.docbody table{border-collapse:collapse;width:100%;margin:10px 0;font-size:13px}
+.docbody th,.docbody td{border:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}
+.docbody th{background:rgba(255,255,255,.04)}
+.docbody a{color:#6ea8ff}
+.docbody blockquote{margin:10px 0;padding:2px 12px;border-left:3px solid var(--line);color:var(--mut)}
+.docbody hr{border:0;border-top:1px solid var(--line);margin:16px 0}
+.hvlist{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px}
+#hvideo{width:100%;max-height:70vh;background:#000;border-radius:8px}
 </style>
 </head>
 <body>
@@ -1502,6 +1647,13 @@ details.sec>summary .editbtn{margin-left:auto}
 </header>
 <main>
   <div id="homeView">
+    <div class="card" id="helpCard">
+      <div class="cardhead"><h2>使用帮助</h2><span class="muted" id="helpSub">加载中…</span></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="ghost" onclick="openHelpVideo()">用法视频</button>
+        <button class="ghost" onclick="openHelpDoc()">用法文档</button>
+      </div>
+    </div>
     <div class="card">
       <div class="cardhead"><h2>新建项目</h2></div>
       <div style="display:flex;gap:8px">
@@ -1698,6 +1850,20 @@ details.sec>summary .editbtn{margin-left:auto}
   <div class="box" style="width:min(720px,96vw);max-height:88vh;overflow:auto">
     <div class="optrow"><b id="jTitle">任务详情</b><button class="ghost" onclick="closeJob()">关闭</button></div>
     <div id="jBody"></div>
+  </div>
+</div>
+<div class="modal" id="docModal" onclick="if(event.target===this)closeDoc()">
+  <div class="box" style="width:min(980px,98vw);max-height:88vh;overflow:auto">
+    <div class="optrow"><b>MiniMax H3 使用说明</b><button class="ghost" onclick="closeDoc()">关闭</button></div>
+    <div id="docBody" class="docbody"></div>
+  </div>
+</div>
+<div class="modal" id="helpModal" onclick="if(event.target===this)closeHelp()">
+  <div class="box" style="width:min(1040px,98vw)">
+    <div class="optrow"><b>用法视频</b><button class="ghost" onclick="closeHelp()">关闭</button></div>
+    <div class="hvlist" id="hvList"></div>
+    <video id="hvideo" controls playsinline webkit-playsinline></video>
+    <div class="muted" id="hvMsg" style="margin-top:8px"></div>
   </div>
 </div>
 <script>
@@ -2479,6 +2645,45 @@ async function releaseVram(){
   if(!ok) return;
   fetch('/api/service/stop',{method:'POST'}).then(async r=>{ const j=await r.json(); alert(j.msg||'ok'); refreshState(); }); }
 
+// ---- help (usage doc + videos) ----
+async function refreshHelp(){
+  const j=await api('/api/help'); if(!j) return;
+  const n=(j.videos||[]).length, parts=[];
+  if(n) parts.push(n+' 段操作视频');
+  if(j.doc) parts.push('图文使用说明');
+  $('helpSub').textContent = parts.length? ('含 '+parts.join(' + ')) : '暂无可用帮助内容';
+}
+async function openHelpDoc(){
+  $('docBody').innerHTML='<span class="muted">加载中…</span>';
+  $('docModal').classList.add('open');
+  try{
+    const r=await fetch('/help/doc');
+    if(!r.ok) throw 0;
+    $('docBody').innerHTML=await r.text();
+  }catch(e){ $('docBody').innerHTML='<span class="muted">文档加载失败</span>'; }
+}
+function closeDoc(){ $('docModal').classList.remove('open'); }
+async function openHelpVideo(){
+  const j=await api('/api/help'); const vids=(j&&j.videos)||[];
+  if(!vids.length){ alert('未找到用法视频文件'); return; }
+  const box=$('hvList'); box.innerHTML='';
+  vids.forEach(v=>{ const b=document.createElement('button'); b.className='ghost';
+    b.textContent=v.title; b.onclick=()=>playHelp(v,b); box.appendChild(b); });
+  $('helpModal').classList.add('open');
+  playHelp(vids[0], box.firstChild);
+}
+function playHelp(v,btn){
+  [...$('hvList').children].forEach(b=>b.className=(b===btn?'primary':'ghost'));
+  $('hvMsg').textContent=v.title+'  ·  '+v.name;
+  const vid=$('hvideo');
+  vid.src='/help/video/'+encodeURIComponent(v.name);
+  vid.play().catch(()=>{});
+}
+function closeHelp(){
+  const vid=$('hvideo'); vid.pause();
+  vid.removeAttribute('src'); if(vid.load) vid.load();
+  $('helpModal').classList.remove('open');
+}
 async function optimizePrompt(){
   const prompt=$('prompt').value.trim();
   if(!prompt){ $('submitMsg').textContent='请先填写提示词'; return; }
@@ -2513,7 +2718,7 @@ function fallbackCopy(){
 function applyOpt(){ const t=$('optText').value; if(!t) return; $('prompt').value=t; closeOpt(); }
 
 onModeChange();
-(async()=>{ await refreshProjects(); route(); })();
+(async()=>{ await refreshProjects(); refreshHelp(); route(); })();
 refreshState();
 setInterval(refreshState,2000); setInterval(refreshProjects,5000);
 setInterval(refreshJobs,5000); setInterval(refreshOutputs,5000); setInterval(pollLog,1500);
