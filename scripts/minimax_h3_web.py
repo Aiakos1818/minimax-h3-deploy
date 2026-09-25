@@ -3212,7 +3212,7 @@ async function refreshImageJobs(){
     else acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'delete\')">删除</button>';
     if(j.status==='cancelled'||j.status==='failed'||j.status==='interrupted')
       acts+=' <button class="ghost" onclick="retryJob(\''+j.id+'\')">重新生成</button>';
-    if(j.material_id) acts+=' <button class="ghost" onclick="detailMaterial(\''+j.material_id+'\')">查看</button>';
+    if(j.material_id) acts+=' <button class="ghost" onclick="viewMaterial(\''+j.material_id+'\')">查看</button>';
     if(j.material_id && j.status==='done') acts+=' <button class="ghost" onclick="reuseMaterial(\''+j.material_id+'\')">复用</button>';
     let thumb='';
     const mt=j.material_id? materials.find(m=>m.id===j.material_id) : null;
