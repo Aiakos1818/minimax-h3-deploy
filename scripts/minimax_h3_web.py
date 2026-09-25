@@ -1045,7 +1045,8 @@ class Manager:
             clips.append({"rel": rel, "name": os.path.basename(p),
                           "size": os.path.getsize(p), "project": pid,
                           "ts": time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(p))),
-                          "job": m.get("id"), "seconds": m.get("clip_seconds"),
+                          "job": m.get("id"), "shot": m.get("name"),
+                          "seconds": m.get("clip_seconds"),
                           "frames": m.get("clip_frames"), "seed": m.get("seed"),
                           "params": m.get("params")})
         return {"clips": clips}
@@ -1902,6 +1903,9 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
         background:rgba(0,0,0,.6);border:2px solid #fff;display:flex;align-items:center;justify-content:center;
         font-size:12px;color:#fff}
 .matcard.sel .picktag{background:var(--acc);border-color:var(--acc)}
+.matcard .shotname{position:absolute;top:6px;left:6px;max-width:calc(100% - 40px);padding:2px 7px;
+        border-radius:6px;background:rgba(0,0,0,.65);color:#fff;font-size:12px;font-weight:600;
+        overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .matempty{color:var(--mut);font-size:13px;margin-top:10px}
 .detprompt{background:#0b0e13;border:1px solid var(--line);border-radius:8px;padding:8px;font-size:13px;
        white-space:pre-wrap;word-break:break-word;max-height:200px;overflow:auto;line-height:1.55}
@@ -1985,6 +1989,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   <span class="hdrright">
     <span id="pVram" class="pill">VRAM --</span>
     <button class="ghost" onclick="releaseVram()">释放显存</button>
+    <button class="ghost" onclick="openLog()">诊断日志</button>
   </span>
 </header>
 <main>
@@ -2100,10 +2105,6 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
         <details class="sec" open>
           <summary>分镜记录</summary>
           <div id="jobs" class="muted">暂无</div>
-        </details>
-        <details class="logBox" id="logBox" style="margin-top:12px">
-          <summary class="muted">诊断日志</summary>
-          <pre class="log" id="log"></pre>
         </details>
         <span class="cardacts"><button class="ghost" onclick="openEdit()">剪辑</button></span>
       </div>
@@ -2236,6 +2237,12 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   <div class="box" style="width:min(720px,96vw);max-height:88vh;overflow:auto">
     <div class="optrow"><b id="jTitle">分镜详情</b><button class="ghost" onclick="closeJob()">关闭</button></div>
     <div id="jBody"></div>
+  </div>
+</div>
+<div class="modal" id="logModal" onclick="if(event.target===this)closeLog()">
+  <div class="box" style="width:min(960px,98vw)">
+    <div class="optrow"><b>诊断日志</b><button class="ghost" onclick="closeLog()">关闭</button></div>
+    <pre class="log" id="log" style="height:60vh;max-height:60vh"></pre>
   </div>
 </div>
 <div class="modal" id="docModal" onclick="if(event.target===this)closeDoc()">
@@ -2397,6 +2404,11 @@ function notice(msg,title){
   $('noticeModal').classList.add('open');
 }
 function closeNotice(){ $('noticeModal').classList.remove('open'); }
+function openLog(){
+  $('logModal').classList.add('open');
+  pollLog().then(()=>{ const el=$('log'); el.scrollTop=el.scrollHeight; });
+}
+function closeLog(){ $('logModal').classList.remove('open'); }
 function askConfirm(msg,title,okText){
   return new Promise(res=>{
     askCb=res;
@@ -2770,7 +2782,11 @@ async function openPick(kind, mode){
 function togglePick(key){
   if(pickSingle) pickSel=new Set(pickSel.has(key)?[]:[key]);
   else if(pickSel.has(key)) pickSel.delete(key); else pickSel.add(key);
-  renderPickGrid();
+  document.querySelectorAll('#pickGrid .matcard').forEach(d=>{   // 只更新选中态，不重建，避免视频重新加载
+    const on=pickSel.has(d.dataset.key);
+    d.classList.toggle('sel',on);
+    const t=d.querySelector('.picktag'); if(t) t.textContent=on?'✓':'';
+  });
 }
 function renderPickGrid(){
   const pid=curProject, box=$('pickGrid'); box.innerHTML='';
@@ -2779,8 +2795,10 @@ function renderPickGrid(){
     clipsCache.forEach(c=>{
       const on=pickSel.has(c.rel);
       const d=document.createElement('div'); d.className='matcard pick'+(on?' sel':'');
+      d.dataset.key=c.rel;
       d.onclick=()=>togglePick(c.rel);
-      d.innerHTML='<div class="picktag">'+(on?'✓':'')+'</div>'+
+      d.innerHTML=(c.shot?'<div class="shotname" title="'+esc(c.shot)+'">'+esc(c.shot)+'</div>':'')+
+        '<div class="picktag">'+(on?'✓':'')+'</div>'+
         '<video class="thumb" muted playsinline preload="metadata" src="/files/'+encodeURI(c.rel)+'"></video>'+
         '<div class="mb"><div class="nm" title="'+esc(c.name)+'">'+esc(c.name)+'</div>'+
         '<div class="mm">产物 · '+fmtSize(c.size)+' · '+c.ts+'</div></div>';
@@ -2792,6 +2810,7 @@ function renderPickGrid(){
   if(!list.length){ box.innerHTML='<div class="matempty">暂无可用素材</div>'; return; }
   list.forEach(m=>{
     const d=document.createElement('div'); d.className='matcard pick'+(pickSel.has(m.id)?' sel':'');
+    d.dataset.key=m.id;
     d.onclick=()=>togglePick(m.id);
     d.innerHTML='<div class="picktag">'+(pickSel.has(m.id)?'✓':'')+'</div>'+matPreview(m,pid)+
       '<div class="mb"><div class="nm" title="'+esc(m.name)+'">'+esc(m.name)+'</div>'+
