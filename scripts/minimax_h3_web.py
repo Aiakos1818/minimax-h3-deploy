@@ -2177,7 +2177,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     <div class="card">
       <div class="cardhead"><h2>新建项目</h2></div>
       <div style="display:flex;gap:8px">
-        <input id="newProjName" placeholder="如：超人大战蝙蝠侠" onkeydown="if(event.key==='Enter')newProject()">
+        <input id="newProjName" onkeydown="if(event.key==='Enter')newProject()">
         <button class="ghost" style="flex:0 0 auto" onclick="newProject()">创建</button>
       </div>
       <div class="muted" id="projMsg" style="margin-top:8px"></div>
@@ -2206,7 +2206,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
             <label id="promptLabel"></label>
             <button class="ghost" id="optBtn" onclick="optimizePrompt()">优化</button>
           </div>
-          <textarea id="prompt" placeholder="Cinematic shot of the subject ..."></textarea>
+          <textarea id="prompt"></textarea>
         </div>
         <div class="fcol">
           <div id="t2vBox">
@@ -2244,7 +2244,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
         <div class="grid3">
           <div><label>时长(秒)</label><input id="dur" type="number" value="5" min="1" max="15" step="0.5"></div>
           <div><label>步数</label><input id="steps" type="number" value="8" min="1" max="50"></div>
-          <div class="fseed"><label>seed(空=随机)</label><input id="seed" type="number" placeholder="随机"></div>
+          <div class="fseed"><label>seed(空=随机)</label><input id="seed" type="number"></div>
         </div>
         <div class="grid2">
           <div><label>画幅</label><select id="aspect"></select></div>
@@ -2288,12 +2288,12 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
             </div>
             <div class="grid2" style="margin-top:10px">
               <div><label>步数</label><input id="imgSteps" type="number" value="8" min="1" max="50"></div>
-              <div class="fseed"><label>seed(空=随机)</label><input id="imgSeed" type="number" placeholder="随机"></div>
+              <div class="fseed"><label>seed(空=随机)</label><input id="imgSeed" type="number"></div>
             </div>
           </div>
           <div class="fcol">
             <label>提示词</label>
-            <textarea id="imgPrompt" placeholder="Cinematic ... "></textarea>
+            <textarea id="imgPrompt"></textarea>
           </div>
         </div>
       </div>
@@ -2319,12 +2319,12 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
             </div>
             <div class="grid2" style="margin-top:10px">
               <div><label>步数</label><input id="imgI2ISteps" type="number" value="8" min="1" max="50"></div>
-              <div class="fseed"><label>seed(空=随机)</label><input id="imgI2ISeed" type="number" placeholder="随机"></div>
+              <div class="fseed"><label>seed(空=随机)</label><input id="imgI2ISeed" type="number"></div>
             </div>
           </div>
           <div class="fcol">
             <label>提示词</label>
-            <textarea id="imgI2IPrompt" placeholder="描述想要得到的结果 ..."></textarea>
+            <textarea id="imgI2IPrompt"></textarea>
           </div>
         </div>
       </div>
@@ -2432,7 +2432,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
   <div class="box">
     <div class="optrow"><b>提示词优化</b><button class="ghost" onclick="closeOpt()">关闭</button></div>
     <div class="muted" id="optMsg" style="margin-bottom:8px"></div>
-    <textarea id="optText" class="opttext" readonly placeholder="优化结果将显示在这里"></textarea>
+    <textarea id="optText" class="opttext" readonly></textarea>
     <div class="optacts">
       <button class="primary" onclick="copyOpt()">复制</button>
       <button class="ghost" onclick="applyOpt()">替换输入框</button>
@@ -2496,7 +2496,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
 <div class="modal" id="shotModal" onclick="if(event.target===this)closeShotModal()">
   <div class="box" style="width:min(420px,96vw)">
     <div class="optrow"><b id="shotTitle">添加分镜</b><button class="ghost" onclick="closeShotModal()">关闭</button></div>
-    <input id="shotVal" placeholder="分镜名（项目内唯一）" onkeydown="if(event.key==='Enter'){event.preventDefault();confirmShot()}">
+    <input id="shotVal" onkeydown="if(event.key==='Enter'){event.preventDefault();confirmShot()}">
     <div class="muted" id="shotMsg" style="margin-top:8px;min-height:1.2em;color:var(--err)"></div>
     <div class="optacts">
       <button class="ghost" onclick="closeShotModal()">取消</button>
@@ -2708,7 +2708,6 @@ function askInput(title,value,okText,ph){
     $('inputTitle').textContent=title||'输入';
     $('inputOk').textContent=okText||'确定';
     $('inputVal').value=value||'';
-    $('inputVal').placeholder=ph||'';
     $('inputModal').classList.add('open');
     setTimeout(()=>{ $('inputVal').focus(); $('inputVal').select(); },50);
   });
@@ -2717,7 +2716,6 @@ function inputResolve(v){ $('inputModal').classList.remove('open'); const cb=inp
 function openShotModal(title,value,okText,cb,mode){
   shotCb=cb; shotMode=(mode==='image')?'image':'shot';
   $('shotTitle').textContent=title||'添加分镜';
-  $('shotVal').placeholder=(shotMode==='image')?'素材名（项目内唯一）':'分镜名（项目内唯一）';
   $('shotOk').textContent=okText||'确定';
   $('shotVal').value=value||'';
   $('shotMsg').textContent='';
