@@ -1350,6 +1350,7 @@ class Manager:
                 "detail": st.get("detail"),
                 "err": st.get("err"),
                 "seed": None if st.get("seed") is None else str(st.get("seed")),
+                "model": st.get("model") or (job.get("cfg") or {}).get("model"),
                 "params": st.get("params"), "media": st.get("media"),
                 "clip_rel": st.get("clip_rel"), "clip_size": st.get("clip_size"),
                 "clip_frames": st.get("clip_frames"), "clip_seconds": st.get("clip_seconds"),
@@ -2763,6 +2764,7 @@ const STATUS_CN = {queued:'排队中', running:'进行中', done:'已完成', fa
 const MEDIA_CN = {ref_image:'图', ref_video:'视频', ref_audio:'音频'};
 const MODE_CN = {t2v:'文生视频', ref2v:'参考生视频', edit:'剪辑成片', t2i:'文生图', i2i:'图生图'};
 const GEN_CN = {t2i:'文生图', i2i:'图生图'};
+const IMG_MODEL_CN = {zimage:'Z-Image Turbo', qwen:'Qwen-Image-2.1'};
 const TRANS_CN = {cut:'硬切', fade:'黑场渐隐', dissolve:'交叉溶解', push:'推进/滑动'};
 const EDIT_ASPECTS = [['0','原始画幅'],['2.39','2.39:1 宽银幕'],['16:9','16:9 横屏'],
   ['9:16','9:16 竖屏'],['1:1','1:1 方形'],['4:3','4:3 横版'],['3:4','3:4 竖版']];
@@ -3049,9 +3051,11 @@ function showJob(id){
   $('jTitle').textContent='分镜详情 · '+(j.name? j.name+' · ':'')+id;
   const row=(k,v)=>'<div class="detrow"><span class="muted">'+k+'</span><span>'+v+'</span></div>';
   let h='';
+  const isImg=(j.mode==='t2i'||j.mode==='i2i');
   if(j.name) h+=row('分镜名', esc(j.name));
   h+=row('类型', MODE_CN[j.mode]||j.mode||'-');
-  h+=row('时长', p.dur!=null? p.dur+' 秒':'-');
+  if(isImg) h+=row('底座引擎', IMG_MODEL_CN[j.model]||j.model||'-');
+  else h+=row('时长', p.dur!=null? p.dur+' 秒':'-');
   h+=row('步数', p.steps!=null? p.steps:'-');
   h+=row('seed', j.seed!=null? String(j.seed):'-');
   h+=row('画幅', esc(p.aspect||'-'));
@@ -3473,6 +3477,7 @@ function detailMaterial(mid){
   h+=row('素材名', esc(m.name));
   h+=row('ID', esc(m.id));
   h+=row('类型', esc(GEN_CN[m.gen]||'图片'));
+  if(m.gen) h+=row('底座引擎', IMG_MODEL_CN[m.model]||'Z-Image Turbo');
   h+=row('大小', fmtSize(m.size));
   h+=row('生成时间', esc(m.ts||'-'));
   if(m.aspect) h+=row('画幅', esc(m.aspect));
