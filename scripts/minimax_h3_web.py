@@ -1857,7 +1857,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .matcard video.thumb{cursor:pointer}
 .matcard .thumbicon{grid-area:thumb;width:100%;aspect-ratio:16/9;background:#0a0c11;display:flex;flex-direction:column;
         align-items:center;justify-content:center;gap:4px;color:var(--mut);font-size:12px;letter-spacing:.05em;cursor:pointer}
-.matcard .thumbicon audio[controls]{width:100%;padding:0 8px;box-sizing:border-box}
+.matcard .thumbicon .audplay{font-size:22px;line-height:1;color:var(--acc)}
 .viewbody img{display:block;margin:0 auto;max-width:100%;max-height:82vh;border-radius:8px}
 .viewbody video{display:block;width:100%;max-height:82vh;background:#000;border-radius:8px}
 .viewbody audio{width:100%}
@@ -2641,7 +2641,7 @@ function matPreview(m,pid,live){
   if(m.kind==='image') return '<img class="thumb" loading="lazy" src="'+thumbUrl(pid,m.file,m.thumb_v,nm)+'">';
   const u=matUrl(pid,m.file,nm);
   if(m.kind==='video') return '<video class="thumb" muted playsinline preload="none" title="'+esc(nm)+'" poster="'+thumbUrl(pid,m.file,m.thumb_v)+'" src="'+u+'"></video>';
-  if(live) return '<div class="thumbicon"><audio controls preload="none" title="'+esc(nm)+'" src="'+u+'"></audio></div>';
+  if(live) return '<div class="thumbicon"><span class="audplay">▶</span>'+MAT_KIND_CN[m.kind]+'</div>';
   return '<div class="thumbicon">'+MAT_KIND_CN[m.kind]+'</div>';
 }
 function renderMaterials(){
@@ -2674,6 +2674,8 @@ function renderMaterials(){
             const ov=d.querySelector('.thumbdl');
             if(ov) ov.addEventListener('dblclick',()=>viewMaterial(m.id));
           }else if(m.kind==='video'){
+            d.firstElementChild.addEventListener('click',()=>viewMaterial(m.id));
+          }else if(m.kind==='audio'){
             d.firstElementChild.addEventListener('click',()=>viewMaterial(m.id));
           }
         }
