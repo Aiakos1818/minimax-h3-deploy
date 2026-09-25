@@ -2073,6 +2073,15 @@ details.sec>summary .editbtn{margin-left:auto}
     </div>
   </div>
 </div>
+<div class="modal" id="noticeModal" onclick="if(event.target===this)closeNotice()">
+  <div class="box" style="width:min(420px,96vw)">
+    <div class="optrow"><b id="noticeTitle">提示</b><button class="ghost" onclick="closeNotice()">关闭</button></div>
+    <div class="muted" id="noticeMsg" style="margin-bottom:14px;white-space:pre-wrap;word-break:break-word"></div>
+    <div class="optacts">
+      <button class="primary" onclick="closeNotice()">知道了</button>
+    </div>
+  </div>
+</div>
 <div class="modal" id="askModal" onclick="if(event.target===this)askResolve(false)">
   <div class="box" style="width:min(420px,96vw)">
     <div class="optrow"><b id="askTitle">确认</b></div>
@@ -2221,7 +2230,7 @@ async function renameProject(){
   const r=await fetch('/api/projects/'+encodeURIComponent(curProject)+'/rename',{method:'POST',
     headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
   const j=await r.json().catch(()=>({}));
-  if(!r.ok){ alert('改名失败：'+(j.error||j.msg||r.status)); return; }
+  if(!r.ok){ notice('改名失败：'+(j.error||j.msg||r.status)); return; }
   await refreshProjects();
 }
 let delPid=null;
@@ -2246,11 +2255,17 @@ async function confirmDeleteProject(){
     headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
   const j=await r.json().catch(()=>({}));
   closeDel();
-  if(!r.ok){ alert('删除失败：'+(j.error||j.msg||r.status)); return; }
+  if(!r.ok){ notice('删除失败：'+(j.error||j.msg||r.status)); return; }
   goHome(); await refreshProjects();
 }
 $('delClips').onchange=updDelHint;
 let askCb=null;
+function notice(msg,title){
+  $('noticeTitle').textContent=title||'提示';
+  $('noticeMsg').textContent=msg||'';
+  $('noticeModal').classList.add('open');
+}
+function closeNotice(){ $('noticeModal').classList.remove('open'); }
 function askConfirm(msg,title,okText){
   return new Promise(res=>{
     askCb=res;
@@ -2331,7 +2346,7 @@ function closeJob(){
 }
 async function reuseJob(id){
   const j=jobsById[id]; if(!j) return;
-  if(!curProject){ alert('请先进入一个项目'); return; }
+  if(!curProject){ notice('请先进入一个项目'); return; }
   const p=j.params||{}, m=j.media||{};
   $('submitMsg').textContent='正在载入任务 '+id+' 的素材…';
   $('mode').value=(j.mode==='ref2v')?'ref2v':'t2v'; onModeChange();
@@ -2442,14 +2457,53 @@ function clearSelMat(){
   renderAllSlots();
 }
 function matById(id){ return materials.find(m=>m.id===id)||null; }
+function slotItems(kind){
+  const mats=selMat[kind].map(matById).filter(Boolean).map(m=>({src:'mat',id:m.id,name:m.name}));
+  const clips=selClip[kind].map(rel=>clipsCache.find(c=>c.rel===rel)).filter(Boolean)
+                              .map(c=>({src:'clip',rel:c.rel,name:c.name}));
+  return mats.concat(clips);
+}
+function itemKey(it){ return it.src==='mat'? ('mat:'+it.id) : ('clip:'+it.rel); }
+function promptRefRe(prefix){ return new RegExp('<'+prefix+'\\s+(\\d+)>','g'); }
+function promptHasRef(prefix,n){ return new RegExp('<'+prefix+'\\s+'+n+'>').test($('prompt').value); }
+function remapPromptRefs(prefix,mapFn){
+  const ta=$('prompt'), re=promptRefRe(prefix);
+  ta.value=ta.value.replace(re,(m,n)=>{ const nn=mapFn(parseInt(n,10)); return nn? ('<'+prefix+' '+nn+'>') : m; });
+}
+// Replace a slot's selection: block dropping items still referenced in the prompt,
+// then renumber the remaining <Prefix N> references to match the new order.
+function setSlotSelection(kind,newItems){
+  const prefix=SLOT_CN[kind].prefix, oldItems=slotItems(kind);
+  const oldNumByKey=new Map(oldItems.map((it,i)=>[itemKey(it),i+1]));
+  const newNumByKey=new Map(newItems.map((it,i)=>[itemKey(it),i+1]));
+  if(prefix){
+    for(const it of oldItems){
+      const key=itemKey(it), n=oldNumByKey.get(key);
+      if(!newNumByKey.has(key) && promptHasRef(prefix,n)){
+        notice('无法移除：「'+it.name+'」已在提示词中被 <'+prefix+' '+n+'> 引用。\n请先删除提示词中的该引用，再移除。');
+        return false;
+      }
+    }
+  }
+  selMat[kind]=newItems.filter(it=>it.src==='mat').map(it=>it.id);
+  selClip[kind]=newItems.filter(it=>it.src==='clip').map(it=>it.rel);
+  if(prefix){
+    const oldKeyByNum=new Map(oldItems.map((it,i)=>[i+1,itemKey(it)]));
+    remapPromptRefs(prefix,n=>{
+      const key=oldKeyByNum.get(n);
+      return key? newNumByKey.get(key) : null;
+    });
+  }
+  renderSlot(kind);
+  return true;
+}
 function renderSlot(kind){
   const cfg=SLOT_CN[kind], list=$(cfg.list); if(!list) return;
   const mats=selMat[kind].map(matById).filter(Boolean);
   selMat[kind]=mats.map(m=>m.id);
   const clips=selClip[kind].map(rel=>clipsCache.find(c=>c.rel===rel)).filter(Boolean);
   selClip[kind]=clips.map(c=>c.rel);
-  const items=[].concat(mats.map(m=>({src:'mat',id:m.id,name:m.name})),
-                        clips.map(c=>({src:'clip',rel:c.rel,name:c.name})));
+  const items=slotItems(kind);
   list.innerHTML='';
   items.forEach((it,i)=>{
     const li=document.createElement('li');
@@ -2462,11 +2516,7 @@ function renderSlot(kind){
       acts.appendChild(chip);
     }
     const rm=document.createElement('button'); rm.className='rm'; rm.textContent='移除';
-    rm.onclick=()=>{
-      if(it.src==='mat') selMat[kind]=selMat[kind].filter(x=>x!==it.id);
-      else selClip[kind]=selClip[kind].filter(x=>x!==it.rel);
-      renderSlot(kind);
-    };
+    rm.onclick=()=>setSlotSelection(kind, items.filter(x=>itemKey(x)!==itemKey(it)));
     acts.appendChild(rm);
     li.appendChild(nm); li.appendChild(acts); list.appendChild(li);
   });
@@ -2505,7 +2555,7 @@ async function refreshMaterials(){
   renderMaterials(); renderAllSlots();
 }
 async function uploadMaterial(){
-  if(!curProject){ alert('请先进入一个项目'); return; }
+  if(!curProject){ notice('请先进入一个项目'); return; }
   const name=$('matName').value.trim();
   const f=$('matFile').files[0];
   if(!name){ $('matMsg').textContent='请填写素材名称'; return; }
@@ -2530,7 +2580,7 @@ async function renameMaterial(mid){
   const r=await fetch('/api/materials/'+encodeURIComponent(curProject)+'/'+encodeURIComponent(mid)+'/rename',
     {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
   const j=await r.json().catch(()=>({}));
-  if(!r.ok){ alert('改名失败：'+(j.error||j.msg||r.status)); return; }
+  if(!r.ok){ notice('改名失败：'+(j.error||j.msg||r.status)); return; }
   materials=j.materials||materials; renderMaterials(); renderAllSlots();
 }
 async function deleteMaterial(mid){
@@ -2540,15 +2590,15 @@ async function deleteMaterial(mid){
   const r=await fetch('/api/materials/'+encodeURIComponent(curProject)+'/'+encodeURIComponent(mid)+'/delete',
     {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
   const j=await r.json().catch(()=>({}));
-  if(!r.ok){ alert('删除失败：'+(j.error||j.msg||r.status)); return; }
+  if(!r.ok){ notice('删除失败：'+(j.error||j.msg||r.status)); return; }
   materials=j.materials||materials; renderMaterials(); renderAllSlots();
 }
 async function openPick(kind, mode){
-  if(!curProject){ alert('请先进入一个项目'); return; }
+  if(!curProject){ notice('请先进入一个项目'); return; }
   pickMode=(mode==='clip')?'clip':'mat';
   if(pickMode==='clip'){
     await refreshOutputs();
-    if(!clipsCache.length){ alert('该项目还没有产物，先生成或用素材库素材。'); return; }
+    if(!clipsCache.length){ notice('该项目还没有产物，先生成或用素材库素材。'); return; }
     pickKind=kind; pickSingle=false;
     pickSel=new Set(selClip[kind]);
     $('pickTitle').textContent='选择产物 · '+SLOT_CN[kind].cn;
@@ -2556,7 +2606,7 @@ async function openPick(kind, mode){
   }else{
     const mk=SLOT_MEDIA[kind];
     if(!materials.some(m=>m.kind===mk)){
-      alert('素材库中还没有'+MAT_KIND_CN[mk]+'素材，请先在「素材库」上传。'); return;
+      notice('素材库中还没有'+MAT_KIND_CN[mk]+'素材，请先在「素材库」上传。'); return;
     }
     pickKind=kind; pickSingle=(kind==='first_frame'||kind==='last_frame');
     pickSel=new Set(selMat[kind]);
@@ -2601,9 +2651,20 @@ function renderPickGrid(){
 }
 function pickOk(){
   if(!pickKind) return;
-  if(pickMode==='clip') selClip[pickKind]=Array.from(pickSel);
-  else selMat[pickKind]=Array.from(pickSel);
-  renderSlot(pickKind);
+  const old=slotItems(pickKind);
+  let newItems;
+  if(pickMode==='clip'){
+    const clips=Array.from(pickSel).map(rel=>{
+      const c=clipsCache.find(x=>x.rel===rel);
+      return c? {src:'clip',rel:c.rel,name:c.name} : null;
+    }).filter(Boolean);
+    newItems=old.filter(it=>it.src==='mat').concat(clips);
+  }else{
+    const mats=Array.from(pickSel).map(id=>{ const m=matById(id); return m? {src:'mat',id:m.id,name:m.name} : null; })
+                              .filter(Boolean);
+    newItems=mats.concat(old.filter(it=>it.src==='clip'));
+  }
+  if(!setSlotSelection(pickKind,newItems)) return;   // blocked by a live prompt reference
   closePick();
 }
 function closePick(){ $('pickModal').classList.remove('open'); pickKind=null; pickSel=new Set(); }
@@ -2619,16 +2680,16 @@ function onModeChange(){
 }
 
 async function submit(){
-  if(!curProject){ alert('请先进入一个项目'); goHome(); return; }
+  if(!curProject){ notice('请先进入一个项目'); goHome(); return; }
   const mode=$('mode').value;
   const prompt=$('prompt').value.trim();
-  if(!prompt){ alert('请填写提示词'); return; }
+  if(!prompt){ notice('请填写提示词'); return; }
   const dur=$('dur').value, steps=$('steps').value;
   let media='';
   if(mode==='ref2v'){
     const imgs=selMat.ref_image, vids=selMat.ref_video.length+selClip.ref_video.length,
           auds=selMat.ref_audio;
-    if(!imgs.length && !vids && !auds.length){ alert('请至少选择一个参考素材'); return; }
+    if(!imgs.length && !vids && !auds.length){ notice('请至少选择一个参考素材'); return; }
     media=[imgs.length?imgs.length+'图':null, vids?vids+'视频':null,
            auds.length?auds.length+'音频':null].filter(Boolean).join(' / ');
   }else{
@@ -2666,12 +2727,12 @@ async function submit(){
     $('submitBtn').disabled=false;
     try{ const r=JSON.parse(xhr.responseText);
       if(xhr.status===202){ $('submitMsg').textContent='已提交: '+r.id; $('prompt').value=''; }
-      else alert('提交失败: '+(r.error||xhr.status));
-    }catch(e){ alert('提交失败: '+xhr.status); }
+      else notice('提交失败: '+(r.error||xhr.status));
+    }catch(e){ notice('提交失败: '+xhr.status); }
     setTimeout(()=>{ $('prog').style.display='none'; },600);
     refreshJobs();
   };
-  xhr.onerror=()=>{ $('submitBtn').disabled=false; alert('网络错误'); };
+  xhr.onerror=()=>{ $('submitBtn').disabled=false; notice('网络错误'); };
   xhr.send(fd);
 }
 
@@ -2838,13 +2899,13 @@ function removeClipsLocal(rels){
 }
 async function clipDelete(){
   const rels=[...clipSel];
-  if(!rels.length){ alert('请先选择要删除的产物'); return; }
+  if(!rels.length){ notice('请先选择要删除的产物'); return; }
   const ok=await askConfirm('确定删除选中的 <b>'+rels.length+'</b> 个产物？删除后不可恢复。','删除产物','删除');
   if(!ok) return;
   const r=await fetch('/api/output/delete',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({rels})});
   const j=await r.json().catch(()=>({}));
-  if(!r.ok){ alert('删除失败：'+(j.error||r.status)); return; }
+  if(!r.ok){ notice('删除失败：'+(j.error||r.status)); return; }
   clipSel.clear(); updClipBar();
   removeClipsLocal(rels);
   if(clipEdit) toggleClipEdit();
@@ -2961,21 +3022,21 @@ async function saveEdit(quiet){
   const r=await fetch('/api/sequence',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({project:curProject,seq:editSeq})});
   const j=await r.json().catch(()=>({}));
-  if(!r.ok){ if(!quiet) alert('保存失败：'+(j.error||r.status)); return false; }
+  if(!r.ok){ if(!quiet) notice('保存失败：'+(j.error||r.status)); return false; }
   editSeq=j.seq||editSeq;
   if(!quiet) $('editMsg').textContent='已保存';
   return true;
 }
 async function renderEdit(){
   editPick();
-  if(!editSeq.clips.length){ alert('时间线为空'); return; }
+  if(!editSeq.clips.length){ notice('时间线为空'); return; }
   const ok=await askConfirm('按当前时间线渲染成片？共 <b>'+editSeq.clips.length+'</b> 段。','预览/导出','渲染');
   if(!ok) return;
-  if(!await saveEdit(true)){ alert('保存失败'); return; }
+  if(!await saveEdit(true)){ notice('保存失败'); return; }
   const r=await fetch('/api/edit/render',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({project:curProject})});
   const j=await r.json().catch(()=>({}));
-  if(r.status!==202){ alert('提交失败：'+(j.error||r.status)); return; }
+  if(r.status!==202){ notice('提交失败：'+(j.error||r.status)); return; }
   editLast=j.id; editLogOff=0; $('editLog').textContent=''; $('editMsg').textContent='渲染已提交：'+j.id;
   refreshEditJobs();
 }
@@ -3013,7 +3074,7 @@ async function delEdit(id){
   if(!ok) return;
   const r=await fetch('/api/edit/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
   const j=await r.json().catch(()=>({}));
-  if(!r.ok){ alert('删除失败：'+(j.error||j.msg||r.status)); return; }
+  if(!r.ok){ notice('删除失败：'+(j.error||j.msg||r.status)); return; }
   if(editLast===id) editLast=null;
   $('editList')._sig=null; refreshEditJobs();
 }
@@ -3038,7 +3099,7 @@ function closeModal(){ $('mvideo').pause(); $('mvideo').src=''; $('modal').class
 async function releaseVram(){
   const ok=await askConfirm('停止 ComfyUI 并释放显存？下次生成需冷启动。','释放显存','停止');
   if(!ok) return;
-  fetch('/api/service/stop',{method:'POST'}).then(async r=>{ const j=await r.json(); alert(j.msg||'ok'); refreshState(); }); }
+  fetch('/api/service/stop',{method:'POST'}).then(async r=>{ const j=await r.json(); notice(j.msg||'ok'); refreshState(); }); }
 
 // ---- help (usage doc + videos) ----
 async function refreshHelp(){
@@ -3060,7 +3121,7 @@ async function openHelpDoc(){
 function closeDoc(){ $('docModal').classList.remove('open'); }
 async function openHelpVideo(){
   const j=await api('/api/help'); const vids=(j&&j.videos)||[];
-  if(!vids.length){ alert('未找到用法视频文件'); return; }
+  if(!vids.length){ notice('未找到用法视频文件'); return; }
   const box=$('hvList'); box.innerHTML='';
   vids.forEach(v=>{ const b=document.createElement('button'); b.className='ghost';
     b.textContent=v.title; b.onclick=()=>playHelp(v,b); box.appendChild(b); });
