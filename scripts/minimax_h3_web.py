@@ -1802,6 +1802,11 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 #stJobs>details>summary{width:fit-content;margin-right:auto}
 #stJobs>details[open]>summary{margin-bottom:22px}
 .jthumb{width:120px;aspect-ratio:16/9;background:#000;border-radius:8px;object-fit:cover;flex:0 0 auto;cursor:pointer}
+.jthumb.ph{position:relative;overflow:hidden;border:1px solid var(--line);cursor:default;
+        background:linear-gradient(100deg,#12161d 30%,#1c2431 50%,#12161d 70%);
+        background-size:200% 100%;animation:phshim 1.4s linear infinite}
+.jthumb.ph>i{position:absolute;left:0;bottom:0;height:3px;background:var(--acc);transition:width .3s}
+@keyframes phshim{0%{background-position:100% 0}100%{background-position:-100% 0}}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;align-items:center;justify-content:center;z-index:20;padding:12px}
 .modal.open{display:flex}
 .modal .box{width:min(960px,98vw);background:#0e1116;border:1px solid var(--line);border-radius:12px;padding:10px}
@@ -2957,10 +2962,20 @@ async function refreshJobs(){
     else acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'delete\')">删除</button>';
     if(j.clip_rel) acts+=' <button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看</button>';
     acts+=' <button class="ghost" onclick="reuseJob(\''+j.id+'\')">复用</button>';
-    d.innerHTML=(j.clip_rel? '<video class="jthumb" preload="metadata" muted playsinline src="/files/'+encodeURI(j.clip_rel)+
-        '" onclick="window.play(\''+j.clip_rel+'\')" title="点击播放"></video>' : '')+
-      '<span class="meta"><b>'+esc(j.name||j.id)+'</b>'+(j.name?' <span class="muted">'+j.id+'</span>':'')+
-      '<br>'+line2+'<br>'+(note||j.created||'')+
+    let thumb='';
+    if(j.clip_rel){
+      thumb='<video class="jthumb" preload="metadata" muted playsinline src="/files/'+encodeURI(j.clip_rel)+
+        '" onclick="window.play(\''+j.clip_rel+'\')" title="点击播放"></video>';
+    }else if(j.status==='running'||j.status==='queued'){
+      const pct=(j.status==='running'&&j.progress&&j.progress.total)
+        ? Math.round(j.progress.cur/j.progress.total*100) : 0;
+      thumb='<div class="jthumb ph" title="'+(STATUS_CN[j.status]||j.status)+'"><i style="width:'+pct+'%"></i></div>';
+    }
+    const head = j.name
+      ? '<b>'+esc(j.name)+'</b><br><span class="muted">'+esc(j.id)+'</span>'
+      : '<b>'+esc(j.id)+'</b>';
+    d.innerHTML=thumb+
+      '<span class="meta">'+head+'<br>'+line2+'<br>'+(note||j.created||'')+
       '<br><span class="'+stCls(j.status)+'">'+(STATUS_CN[j.status]||j.status)+'</span></span>'+
       '<span class="jobsacts">'+acts+'</span>';
     box.appendChild(d);
