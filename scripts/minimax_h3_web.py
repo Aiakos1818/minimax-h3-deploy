@@ -2747,7 +2747,6 @@ function showTaskCard(){
   $('taskCard').style.display='';
   $('shotLabel').textContent=shotName? ('分镜：'+shotName) : '';
   $('submitMsg').textContent='';
-  setTimeout(()=>{ $('taskCard').scrollIntoView({block:'start',behavior:'smooth'}); },30);
 }
 function fileExt(f){ const s=String(f), i=s.lastIndexOf('.'); return i>0? s.slice(i):''; }
 function withExt(name, ext){ const s=String(name||''); return (ext && s.toLowerCase().endsWith(String(ext).toLowerCase()))? s : s+ext; }
@@ -3144,7 +3143,6 @@ function openImageCreator(){
   $('imgJobs')._sig=null;
   refreshImageJobs();
   renderProjHead();
-  setTimeout(()=>{ $('imgCard').scrollIntoView({block:'start',behavior:'smooth'}); },30);
 }
 function closeImageCreator(){
   cancelImageMaterial();
@@ -3162,7 +3160,6 @@ function showImgForm(){
   $('imgNameLabel').textContent=imgName? ('素材名：'+imgName) : '';
   $('imgStatus').textContent='';
   $('imgSubmitBtn').disabled=false;
-  setTimeout(()=>{ $('imgTaskCard').scrollIntoView({block:'start',behavior:'smooth'}); },30);
 }
 async function resetImageForm(){
   const ok=await askConfirm('清空当前填写的内容并恢复默认参数？','重置','清空');
