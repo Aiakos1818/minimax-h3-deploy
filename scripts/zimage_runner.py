@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""zimage_runner.py -- Z-Image Turbo text-to-image driver for the web console.
+"""zimage_runner.py -- Z-Image Turbo image driver for the web console.
 
-Stdlib only. Loads workflows/api/api_image_z_image_turbo.json, overrides the
-prompt / size / seed / steps, submits the graph to ComfyUI (:8188), waits for
-the SaveImage result and copies the PNG to --out. Emits the same "[stage]",
-"[progress]" and "[comfy]" markers minimax_h3_runner.py does so the web console
-can show phases and a step bar.
+Stdlib only. Text-to-image loads workflows/api/api_image_z_image_turbo.json and
+image-to-image loads workflows/api/api_image_z_image_turbo_i2i.json (LoadImage ->
+ImageScaleToTotalPixels -> VAEEncode -> KSampler with denoise = strength).
+Overrides prompt / size / seed / steps, submits the graph to ComfyUI (:8188),
+waits for the SaveImage result and copies the PNG to --out. Emits the same
+"[stage]", "[progress]" and "[comfy]" markers minimax_h3_runner.py does so the
+web console can show phases and a step bar.
 
 Usage:
   zimage_runner.py --prompt "..." --aspect "16:9 (Widescreen)" --megapixels 0.4 \
                    --steps 8 --out output/<project>/t2i/<tag>.png [--seed N]
+  zimage_runner.py --mode i2i --init-image <path> --strength 0.6 --prompt "..." \
+                   --megapixels 0.4 --steps 8 --out output/<project>/i2i/<tag>.png
 """
 import argparse, json, math, os, re, shutil, signal, sys, time, urllib.request, uuid
 
@@ -17,12 +21,17 @@ HOME = os.path.expanduser("~/MiniMax-H3-Deploy")
 API = "http://127.0.0.1:8188"
 OUTPUT = HOME + "/output"
 TEMPLATE = os.path.join(HOME, "workflows", "api", "api_image_z_image_turbo.json")
+TEMPLATE_I2I = os.path.join(HOME, "workflows", "api", "api_image_z_image_turbo_i2i.json")
 COMFY_LOG = os.path.expanduser("~/ComfyUI-Deploy/comfy.log")
+INPUT_DIR = os.path.expanduser("~/ComfyUI-Deploy/input")
 
 SAVE_NODE = "9"
 PROMPT_NODE = "27"
 LATENT_NODE = "13"
 SAMPLER_NODE = "3"
+I2I_LOAD_NODE = "40"
+I2I_SCALE_NODE = "42"
+I2I_ENCODE_NODE = "41"
 
 RATIOS = {
     "16:9 (Widescreen)": 16 / 9,
@@ -60,15 +69,35 @@ def dims(aspect, megapixels, multiple=16):
     return _round(w, multiple), _round(h, multiple)
 
 
-def build_graph(prompt, w, h, seed, steps):
-    with open(TEMPLATE, encoding="utf-8") as f:
+def build_graph(prompt, w, h, seed, steps, mode="t2i", init_name=None,
+                megapixels=0.4, strength=0.6):
+    path = TEMPLATE_I2I if mode == "i2i" else TEMPLATE
+    with open(path, encoding="utf-8") as f:
         g = json.load(f)
     g[PROMPT_NODE]["inputs"]["text"] = prompt
-    g[LATENT_NODE]["inputs"]["width"] = w
-    g[LATENT_NODE]["inputs"]["height"] = h
     g[SAMPLER_NODE]["inputs"]["seed"] = seed
     g[SAMPLER_NODE]["inputs"]["steps"] = steps
+    if mode == "i2i":
+        g[I2I_LOAD_NODE]["inputs"]["image"] = init_name
+        g[I2I_SCALE_NODE]["inputs"]["megapixels"] = megapixels
+        g[SAMPLER_NODE]["inputs"]["latent_image"] = [I2I_ENCODE_NODE, 0]
+        g[SAMPLER_NODE]["inputs"]["denoise"] = strength
+    else:
+        g[LATENT_NODE]["inputs"]["width"] = w
+        g[LATENT_NODE]["inputs"]["height"] = h
     return g
+
+
+def _stage_image(src, tag):
+    if not os.path.isfile(src):
+        sys.exit("init image not found: %s" % src)
+    ext = os.path.splitext(src)[1].lower() or ".png"
+    name = "%s_i2i_init%s" % (tag, ext)
+    dst = os.path.join(INPUT_DIR, name)
+    if os.path.abspath(src) != os.path.abspath(dst):
+        shutil.copy2(src, dst)
+    log("[material] init -> input/%s" % name)
+    return name
 
 
 def submit(g, client):
@@ -175,6 +204,9 @@ def _on_signal(signum, frame):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--prompt", required=True)
+    ap.add_argument("--mode", choices=["t2i", "i2i"], default="t2i")
+    ap.add_argument("--init-image", default=None)
+    ap.add_argument("--strength", type=float, default=0.6)
     ap.add_argument("--aspect", default="16:9 (Widescreen)")
     ap.add_argument("--megapixels", type=float, default=0.4)
     ap.add_argument("--multiple", type=int, default=16)
@@ -187,13 +219,24 @@ def main():
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
 
+    mode = "i2i" if (a.init_image or a.mode == "i2i") else "t2i"
+    if mode == "i2i" and not a.init_image:
+        sys.exit("i2i requires --init-image")
+    strength = max(0.05, min(1.0, a.strength))
+
     w, h = dims(a.aspect, a.megapixels, a.multiple)
     seed = a.seed if a.seed is not None else int.from_bytes(os.urandom(8), "little") & ((1 << 63) - 1)
+    init_name = _stage_image(a.init_image, a.tag) if mode == "i2i" else None
     log("[stage] queue")
-    log("z-image-turbo %dx%d %.2fMP (x%d) seed=%d steps=%d" % (
-        w, h, a.megapixels, a.multiple, seed, a.steps))
+    if mode == "i2i":
+        log("z-image-turbo i2i %.2fMP (x%d) strength=%.2f seed=%d steps=%d"
+            % (a.megapixels, a.multiple, strength, seed, a.steps))
+    else:
+        log("z-image-turbo %dx%d %.2fMP (x%d) seed=%d steps=%d" % (
+            w, h, a.megapixels, a.multiple, seed, a.steps))
 
-    g = build_graph(a.prompt, w, h, seed, a.steps)
+    g = build_graph(a.prompt, w, h, seed, a.steps, mode=mode, init_name=init_name,
+                    megapixels=a.megapixels, strength=strength)
     pid = submit(g, uuid.uuid4().hex)
     log("[stage] queue")
     hist, took = wait_done(pid)
