@@ -125,7 +125,7 @@ python3 ~/MiniMax-H3-Deploy/scripts/minimax_h3_web.py --stop
 
 ### 3.5 素材库
 
-「新建分镜」下方的 **「素材库」** 卡片，用于在项目内集中上传、复用素材。
+项目页右侧「产物」上方的 **「素材库」** 卡片（手机在「分镜记录」之后、「产物」之前），用于在项目内集中上传、复用素材。
 
 - **上传**：填「素材名称」→ 选文件 → 「上传素材」。类型按扩展名自动识别
   （图片：png/jpg/jpeg/webp/bmp/gif；视频：mp4/mov/webm/mkv/avi；音频：mp3/wav/m4a/aac/flac/ogg）。

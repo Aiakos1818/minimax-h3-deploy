@@ -1847,10 +1847,9 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
   .formgrid textarea{min-height:214px}
   .params{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:4px}
   .params>.grid3,.params>.grid2{display:contents}
-  .statgrid{display:grid;gap:14px;grid-template-columns:minmax(0,1fr) minmax(0,1fr);
-            grid-template-areas:"cur clips" "jobs clips"}
-  .statgrid>.card{margin-bottom:0}
-  #stCur{grid-area:cur}#stJobs{grid-area:jobs}#stClips{grid-area:clips}
+  .statgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
+  .statcol{display:flex;flex-direction:column;gap:14px}
+  .statcol>.card{margin-bottom:0}
   .editgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr);gap:14px}
   .editgrid>.card{margin-bottom:0}
   #taskCard{position:relative}
@@ -2005,17 +2004,8 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
         <button class="ghost" onclick="cancelShot()">取消</button>
       </div>
     </div>
-    <div class="card" id="matCard">
-      <div class="cardhead"><h2>素材库</h2><span class="muted" id="matSub"></span></div>
-      <div class="matup">
-        <input id="matName" placeholder="素材名称（项目内唯一）" onkeydown="if(event.key==='Enter'){event.preventDefault();uploadMaterial()}">
-        <input id="matFile" type="file" accept="image/*,video/*,audio/*" onchange="onMatFileChange()">
-        <button type="button" class="ghost" onclick="uploadMaterial()">上传素材</button>
-      </div>
-      <div class="muted" id="matMsg" style="margin-top:6px"></div>
-      <div id="matGrid" class="matgrid"></div>
-    </div>
     <div class="statgrid">
+      <div class="statcol">
       <div class="card" id="stCur">
         <h2>当前分镜</h2>
         <div id="cur"><div class="muted">空闲</div></div>
@@ -2030,6 +2020,18 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
           <div id="jobs" class="muted">暂无</div>
         </details>
       </div>
+      </div>
+      <div class="statcol">
+      <div class="card" id="matCard">
+        <div class="cardhead"><h2>素材库</h2><span class="muted" id="matSub"></span></div>
+        <div class="matup">
+          <input id="matName" placeholder="素材名称（项目内唯一）" onkeydown="if(event.key==='Enter'){event.preventDefault();uploadMaterial()}">
+          <input id="matFile" type="file" accept="image/*,video/*,audio/*" onchange="onMatFileChange()">
+          <button type="button" class="ghost" onclick="uploadMaterial()">上传素材</button>
+        </div>
+        <div class="muted" id="matMsg" style="margin-top:6px"></div>
+        <div id="matGrid" class="matgrid"></div>
+      </div>
       <div class="card" id="stClips">
         <details class="sec" open>
           <summary>产物 <span class="muted" id="clipCount"></span></summary>
@@ -2041,6 +2043,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
           <button class="ghost editonly" style="color:var(--err)" onclick="clipDelete()">删除</button>
           <button class="ghost" id="clipEditBtn" onclick="toggleClipEdit()">编辑</button>
         </span>
+      </div>
       </div>
     </div>
   </div>
