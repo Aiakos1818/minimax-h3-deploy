@@ -798,10 +798,11 @@ class Manager:
             return None, "素材名称不能包含斜杠"
         return name, None
 
-    def _unique_mat_name(self, pid, base):
+    def _unique_mat_name(self, pid, base, kind=None):
         base = re.sub(r"\s+", " ", (base or "").strip())
         base = base.replace("/", "／").replace("\\", "＼")[:40] or "图片"
-        used = {(m.get("name") or "") for m in ((self.projects.get(pid) or {}).get("materials") or [])}
+        used = {(m.get("name") or "") for m in ((self.projects.get(pid) or {}).get("materials") or [])
+                if kind is None or (m.get("kind") or "") == kind}
         if base not in used:
             return base
         i = 2
@@ -829,8 +830,9 @@ class Manager:
             p = self.projects.get(pid)
             if not p:
                 return None, "项目不存在"
-            if any((m.get("name") or "") == name for m in (p.get("materials") or [])):
-                return None, "素材名称「%s」已存在" % name
+            if any((m.get("name") or "") == name and (m.get("kind") or "") == kind
+                   for m in (p.get("materials") or [])):
+                return None, "%s素材名称「%s」已存在" % (MATERIAL_KIND_CN.get(kind, "该"), name)
             d = self._materials_dir(pid)
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, stored), "wb") as f:
@@ -1205,7 +1207,7 @@ class Manager:
             self._set(jid, "status", "failed", ended=NOW(), err="未产出图片")
             log.write("\n[web] failed: no png\n"); return
         base = cfg.get("name") or cfg["params"].get("prompt") or "图片"
-        name = self._unique_mat_name(project, base)
+        name = self._unique_mat_name(project, base, kind="image")
         params = cfg["params"]
         meta = {"prompt": params.get("prompt"), "aspect": params.get("aspect"),
                 "megapixels": params.get("megapixels"), "steps": params.get("steps"),
@@ -2993,7 +2995,7 @@ async function confirmShot(){
   if(name.length>60){ $('shotMsg').textContent=(shotMode==='image'?'素材名':'分镜名')+'过长（>60 字符）'; return; }
   if(shotMode==='image'){
     await refreshMaterials();
-    if(materials.some(m=>(m.name||'')===name)){ $('shotMsg').textContent='已存在同名素材，请换一个名字'; return; }
+    if(materials.some(m=>m.kind==='image' && (m.name||'')===name)){ $('shotMsg').textContent='已存在同名图片素材，请换一个名字'; return; }
   }else{
     const r=await api('/api/jobs?project='+encodeURIComponent(curProject));
     const used=((r&&r.jobs)||[]).some(j=>j.mode!=='edit' && (j.name||'')===name);
@@ -3644,8 +3646,8 @@ async function onMatAddPick(){
     notice(MAT_KIND_CN[fk]+'文件 '+fmtSize(f.size)+'，超过 '+MAT_MAX_MB[fk]+'MB 上限'); return; }
   let name=matNameFromFile(f.name);
   await refreshMaterials();
-  while(materials.some(m=>(m.name||'')===name)){
-    name=await askInput('已存在同名素材「'+name+'」，请修改后上传',name,'上传','新的素材名称');
+  while(materials.some(m=>m.kind===fk && (m.name||'')===name)){
+    name=await askInput('已存在同名'+MAT_KIND_CN[fk]+'素材「'+name+'」，请修改后上传',name,'上传','新的素材名称');
     if(name==null) return;
     name=(name||'').trim().replace(/[/\\]/g,'／');
     if(!name){ notice('请填写素材名称'); return; }
