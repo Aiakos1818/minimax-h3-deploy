@@ -2628,7 +2628,6 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
         <span class="bcbar">
           <button class="ghost" onclick="renderEdit()">预览/导出</button>
           <button class="ghost" onclick="saveEdit()">保存</button>
-          <button class="ghost" onclick="backToProject()">返回项目</button>
         </span>
       </div>
       <div class="grid3" style="max-width:640px">
