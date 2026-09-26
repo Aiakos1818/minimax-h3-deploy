@@ -15,7 +15,7 @@ Usage:
   zimage_runner.py --mode i2i --init-image <path> --strength 0.6 --prompt "..." \
                    --megapixels 0.4 --steps 8 --out output/<project>/i2i/<tag>.png
 """
-import argparse, json, math, os, re, shutil, signal, sys, time, urllib.request, uuid
+import argparse, json, math, os, re, shutil, signal, subprocess, sys, time, urllib.request, uuid
 
 HOME = os.path.expanduser("~/MiniMax-H3-Deploy")
 API = "http://127.0.0.1:8188"
@@ -24,6 +24,8 @@ TEMPLATE = os.path.join(HOME, "workflows", "api", "api_image_z_image_turbo.json"
 TEMPLATE_I2I = os.path.join(HOME, "workflows", "api", "api_image_z_image_turbo_i2i.json")
 COMFY_LOG = os.path.expanduser("~/ComfyUI-Deploy/comfy.log")
 INPUT_DIR = os.path.expanduser("~/ComfyUI-Deploy/input")
+START_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "start-comfyui-for-minimax-h3.sh")
 
 SAVE_NODE = "9"
 PROMPT_NODE = "27"
@@ -55,6 +57,30 @@ def http_json(url, data=None, timeout=120):
 
 def log(msg):
     print(msg, flush=True)
+
+
+def _service_up():
+    try:
+        http_json(API + "/system_stats", timeout=5)
+        return True
+    except Exception:
+        return False
+
+
+def ensure_service():
+    """Start ComfyUI if it is down so image modes share the same engine and
+    queue as the video modes (which start it the same way)."""
+    if _service_up():
+        return
+    log("[lifecycle] starting ComfyUI...")
+    subprocess.run(["bash", START_SH], check=False)
+    t0 = time.time()
+    while time.time() - t0 < 300:
+        if _service_up():
+            log("[lifecycle] service up after %.1fs" % (time.time() - t0))
+            return
+        time.sleep(2)
+    sys.exit("service did not come up")
 
 
 def _round(x, multiple=16):
@@ -227,6 +253,7 @@ def main():
     w, h = dims(a.aspect, a.megapixels, a.multiple)
     seed = a.seed if a.seed is not None else int.from_bytes(os.urandom(8), "little") & ((1 << 63) - 1)
     init_name = _stage_image(a.init_image, a.tag) if mode == "i2i" else None
+    ensure_service()
     log("[stage] queue")
     if mode == "i2i":
         log("z-image-turbo i2i %.2fMP (x%d) strength=%.2f seed=%d steps=%d"
