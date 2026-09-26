@@ -2268,7 +2268,7 @@ pre.log{max-height:240px;overflow:auto;background:#0b0d11;border:1px solid var(-
 .clip.sel{outline:3px solid var(--acc);outline-offset:-3px}
 .clip.sel .pick{background:var(--acc);border-color:var(--acc)}
 #stJobs details>summary{width:100%}
-.secbtn{margin-left:auto;display:flex;align-items:center}
+.secbtn{margin-left:auto;display:flex;align-items:center;gap:8px}
 .secbtn button{padding:3px 10px;font-size:13px;line-height:1.2}
 .jthumb{width:120px;aspect-ratio:16/9;background:#000;border-radius:8px;object-fit:cover;flex:0 0 auto;cursor:pointer}
 .jthumb.ph{position:relative;overflow:hidden;border:1px solid var(--line);cursor:default;
@@ -2599,7 +2599,9 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     </div>
     <div class="card" id="imgCard" style="display:none">
       <details class="sec" open>
-        <summary onclick="toggleSec(event)"><span class="setoggle">创作图片列表</span></summary>
+        <summary onclick="toggleSec(event)"><span class="setoggle">创作图片列表</span>
+          <span class="muted" id="imgListSub"></span>
+          <span class="secbtn"><button class="ghost" onclick="event.preventDefault();event.stopPropagation();addImageMaterial()">添加</button></span></summary>
         <div class="muted" id="imgStatus" style="margin-bottom:8px"></div>
         <div id="imgJobs"></div>
       </details>
@@ -2615,7 +2617,10 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
       <div class="card" id="stJobs">
         <details class="sec" open>
           <summary onclick="toggleSec(event)"><span class="setoggle">分镜列表</span>
-            <span class="secbtn"><button class="ghost" onclick="event.preventDefault();event.stopPropagation();openEdit()">剪辑</button></span>
+            <span class="muted" id="shotSub"></span>
+            <span class="secbtn">
+              <button class="ghost" onclick="event.preventDefault();event.stopPropagation();addShot()">添加</button>
+              <button class="ghost" onclick="event.preventDefault();event.stopPropagation();openEdit()">剪辑</button></span>
           </summary>
           <div id="jobs" class="muted">暂无</div>
         </details>
@@ -2849,9 +2854,8 @@ function renderProjHead(){
   const p=projects.find(x=>x.id===curProject); if(!p){ return; }
   const canEdit=(curProject!=='default');
   const creator=$('imgCard') && $('imgCard').style.display!=='none';
-  const sub = creator
-    ? (materials.filter(m=>m.kind==='image' && m.gen).length+' 个图片素材')
-    : projSub(p);
+  const imgSub = materials.filter(m=>m.kind==='image' && m.gen).length+' 个图片';
+  const sub = creator ? imgSub : projSub(p);
   const sig=[p.id,p.name,canEdit?1:0,creator?1:0,sub].join('|');
   if($('projHead')._sig===sig) return;
   $('projHead')._sig=sig;
@@ -2861,10 +2865,9 @@ function renderProjHead(){
        '<button class="ghost" onclick="deleteProject()">删除</button>':'')+
       '<button class="ghost" onclick="goHome()">全部项目</button>';
   $('projHead').innerHTML='<div class="cardhead"><h2 style="color:var(--fg);font-size:16px">'+esc(p.name)+'</h2>'+
-    '<span class="bcbar">'+bcbar+'</span></div>'+
-    '<div class="projsub"><span class="muted">'+esc(sub)+'</span>'+
-      (creator?'<button class="ghost" onclick="addImageMaterial()">创作图片</button>'
-              :'<button class="ghost" onclick="addShot()">添加分镜</button>')+'</div>';
+    '<span class="bcbar">'+bcbar+'</span></div>';
+  $('shotSub').textContent = (!creator && sub) ? '（'+sub+'）' : '';
+  $('imgListSub').textContent = creator ? '（'+imgSub+'）' : '';
 }
 function openProject(pid){ location.hash='#/p/'+encodeURIComponent(pid); }
 function openEdit(){ if(curProject) location.hash='#/p/'+encodeURIComponent(curProject)+'/edit'; }
