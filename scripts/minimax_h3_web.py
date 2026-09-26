@@ -3006,7 +3006,7 @@ async function confirmShot(){
 }
 function addShot(){
   if(!curProject){ notice('请先进入一个项目'); return; }
-  openShotModal('添加分镜','','确定',(name)=>{ shotName=name; showTaskCard(); });
+  openShotModal('输入分镜名','','确定',(name)=>{ shotName=name; showTaskCard(); });
 }
 function showTaskCard(){
   $('taskCard').style.display='';
@@ -3429,7 +3429,7 @@ function closeImageCreator(){
 }
 function addImageMaterial(){
   if(!curProject){ notice('请先进入一个项目'); return; }
-  openShotModal('创作图片','','确定',(name)=>{ imgName=name; showImgForm(); },'image');
+  openShotModal('输入图片名','','确定',(name)=>{ imgName=name; showImgForm(); },'image');
 }
 function showImgForm(){
   $('imgTaskCard').style.display='';
