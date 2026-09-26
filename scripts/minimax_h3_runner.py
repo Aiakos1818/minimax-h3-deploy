@@ -165,7 +165,7 @@ def ray_base(save_prefix, steps, epoch, unet=UNET_REF2VA):
             "ray_cluster_address": "local", "ray_cluster_namespace": "default",
             "GPU": 2, "ulysses_degree": 2, "ring_degree": 1, "cfg_degree": 1,
             "dp_degree": 1, "sync_ulysses": True, "clear_vram_after_sampling": False,
-            "FSDP": True, "FSDP_CPU_OFFLOAD": False, "XFuser_attention": "SAGE_FP16",
+            "FSDP": True, "FSDP_CPU_OFFLOAD": False, "XFuser_attention": os.environ.get("H3_ATTENTION", "SAGE_FP16"),
             "skip_comm_test": False, "use_mmap": True, "RAYLIGHT_ULYSSES_KV_INT8": "v",
             "reuse_epoch": epoch}},
         "130": {"class_type": "H3MultiGPUCLIPLoader", "inputs": {
