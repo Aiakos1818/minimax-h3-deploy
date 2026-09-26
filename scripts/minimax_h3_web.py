@@ -2854,7 +2854,7 @@ function renderProjHead(){
   if($('projHead')._sig===sig) return;
   $('projHead')._sig=sig;
   const bcbar = creator
-    ? '<button class="ghost" onclick="closeImageCreator()">返回</button>'
+    ? '<button class="ghost" onclick="backToProject()">返回</button>'
     : (canEdit?'<button class="ghost" onclick="renameProject()">改名</button>'+
        '<button class="ghost" onclick="deleteProject()">删除</button>':'')+
       '<button class="ghost" onclick="goHome()">全部项目</button>';
@@ -2869,9 +2869,10 @@ function openEdit(){ if(curProject) location.hash='#/p/'+encodeURIComponent(curP
 function backToProject(){ if(curProject) location.hash='#/p/'+encodeURIComponent(curProject); }
 function goHome(){ location.hash='#/'; }
 function route(){
-  const m=location.hash.match(/^#\/p\/([^/]+)(\/edit)?$/);
+  const m=location.hash.match(/^#\/p\/([^/]+)(\/(edit|image))?$/);
   const pid=m?decodeURIComponent(m[1]):null;
-  const edit=!!(m&&m[2]);
+  const sub=m&&m[3];
+  const edit=sub==='edit', image=sub==='image';
   if(pid && projNames[pid]!==undefined){
     if(curProject!==pid){ curProject=pid;
       $('jobs')._sig=null; $('jobs').innerHTML='';
@@ -2884,10 +2885,11 @@ function route(){
     $('homeView').style.display='none';
     $('projView').style.display=edit?'none':'';
     $('editView').style.display=edit?'':'none';
+    if(image){ showImageCreator(); } else { closeImageCreator(); }
     renderProjHead();
     refreshMaterials();
     if(edit){ refreshEdit(); }
-    else { $('taskCard').style.display='none'; shotName=null; $('shotLabel').textContent=''; refreshJobs(); refreshOutputs(); }
+    else if(!image){ $('taskCard').style.display='none'; shotName=null; $('shotLabel').textContent=''; refreshJobs(); refreshOutputs(); }
   }else{
     curProject=null;
     $('homeView').style.display=''; $('projView').style.display='none'; $('editView').style.display='none';
@@ -3401,8 +3403,8 @@ function openPickImg(){
   renderPickGrid();
   $('pickModal').classList.add('open');
 }
-function openImageCreator(){
-  if(!curProject){ notice('请先进入一个项目'); return; }
+function showImageCreator(){
+  if(!curProject) return;
   $('matCard').style.display='none';
   $('stJobs').style.display='none';
   $('imgCard').style.display='';
@@ -3411,7 +3413,10 @@ function openImageCreator(){
   imgName=null;
   $('imgJobs')._sig=null;
   refreshImageJobs();
-  renderProjHead();
+}
+function openImageCreator(){
+  if(!curProject){ notice('请先进入一个项目'); return; }
+  location.hash='#/p/'+encodeURIComponent(curProject)+'/image';
 }
 function closeImageCreator(){
   cancelImageMaterial();
