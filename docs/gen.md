@@ -2,7 +2,7 @@
 
 > 阶段：MiniMax-H3 部署最早的单任务生成器。直接复用官方 ComfyUI workflow
 > （`MiniMaxH3ImageToVideo`），单机/单卡跑通 t2v/i2v。历史角色：**`scripts/gen.py`
-> 已删除**（单任务用 `chain_director_v3.py --segments 1`，官方图仍可从浏览器或
+> 已删除**（官方图仍可从浏览器或
 > `workflows/api/api_video_minimax_h3_{t2v,i2v}.json` 手工 POST），本文件为用法与结论归档。
 
 ## 职责
@@ -39,4 +39,4 @@ python scripts/gen.py --prompt "..." --seconds 5 --turbo --wait   # turbo LoRA 8
 
 - 单段、无续接、每任务全量重跑（编码 + 装载 + 采样 + 解码）；
 - 采样是大头（吃分辨率×帧数×步数×算力），单卡算力受限；
-- 之后 gen_dual（双卡 TP）与 chain_director v1/v2（多段续接）逐步取代。
+- 之后 gen_dual（双卡 TP）等双卡节点逐步取代。

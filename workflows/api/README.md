@@ -48,8 +48,7 @@ cond 缓存、几乎零编码开销。
 
 > 打断注意：`POST /interrupt` 会中止当前提交，但主进程里已经装载的视频/音频 VAE **会留在显存**
 > （多占 ~2-4G）；紧接着再提交可能在采样第 1 步 OOM（实测碰到过一次）。打断后建议先
-> `~/ComfyUI-Deploy/stop.sh` 再重新启动；走 chain_director 则不受影响（它的 `UnloadVideoVAE`
-> 会显式腾挪并清 ray 池）。
+> `~/ComfyUI-Deploy/stop.sh` 再重新启动。
 
 ## 重新生成
 

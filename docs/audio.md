@@ -1,6 +1,6 @@
 # H3 音频专项（表示 / 段间连接 / 引导 / 底噪调查）
 
-> 横切 gen、gen_dual、chain_director v1/v2 各阶段。重点两件事：
+> 横切 gen、gen_dual 及各阶段。重点两件事：
 > **① 段间 audio 如何结构性连接**；**② 首段"底噪/静音"现象的完整调查与结论**
 > （与采样步数强相关，非工作流/节点缺陷）。含 `--ref-audio`/`cond_audio` 音频引导能力。
 > 所有谱/rms 数值口径一致：音频抽到 32k mono，逐秒窗，频带能量为对应 FFT bin 的 RMS。
@@ -23,15 +23,14 @@
 - **ref2va `<Audio k>`**：`MiniMaxH3ReferenceToVideo` 的 `ref_video_audios` 接受自带音轨
   的参考视频，音轨自动规整（远端无 ffmpeg → 脚本 pyav 重编码 24fps h264/aac 进 input），
   再 `LoadVideo → GetVideoComponents` 拆出 ref audio 进 `minimax_refs`。
-- **`--ref-audio`（v2，chain_director_v2.py）**：独立参考音频文件（脚步声/节拍/音乐等），
+- **`--ref-audio`**：独立参考音频文件（脚步声/节拍/音乐等），
   ≤3 个，脚本经 `LoadAudio`（nodes_audio）→ `ref_audios.ref_audio_i` 接入 ref2va，
   与 `--ref-image`/`--ref-video` 并列。参考内容驱动生成声**跟着参考走**（有结构），
   而不是模型自由发挥的"噪声态"。
 - **`cond_audio` keyframe 锚**（文本音频锚，xdit 补丁，见下）：让 `cond_audio` 段也进入
   采样布局（timestep 锚 + 行 tag），音频锚不被当作自由生成行。
 - 模型/清场注意：ref2va 首段用 ref2va unet（`--steps` 照常，ref2va 无 turbo lora）；
-  带素材首段后 clip2 前脚本自动 restart（GPU0 allocator 残留 ≈100MB 压垮续段），见
-  chain_director_v2.md 三节。
+  带素材首段后、续段前脚本会自动 restart（GPU0 allocator 残留 ≈100MB 压垮续段）。
 
 ### B1. xdit 补丁（raylight `xdit_context_parallel.py`，cond_audio / denoise mask）
 
@@ -69,7 +68,7 @@ Herrgotts masked-AV 把上一段 **audio latent 尾部数字拷贝**进新段 he
 
 ### C2. 缝合侧：stitch() 如何拼音频
 
-（`chain_director_v1.py` / `v2.py` 的 `stitch()`，二者同构）
+（缝合实现 `stitch()`）
 - 每段 raw seg mp4 由 VAEDecodeAudio + CreateVideo 直接带音轨落盘（stereo/32k，见 A）。
 - 对每段取与视频相同的 `[HEAD=39, e0]` 窗口：`video_pass` 取视频帧，`audio_pass`
   按 `round(start*sr/FPS)` 把帧窗换算成样本窗切出音频；各段音频沿样本维 `concat` 成

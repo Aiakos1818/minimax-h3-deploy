@@ -3,8 +3,7 @@
 > 阶段：双卡 FSDP/Ulysses 单段生成。包含整个双卡部署/版本锁/性能调优记录
 > （并入原 `DUAL_TP_NOTES.md`），以及为链式任务装载优化做的 CLIP SSD-offload
 > 往返实验归档（并入原 `clip_offload_experiment_20260904.md`）。
-> 脚本能力此后被 chain_director v1/v2/v3 的多段链继承；**`scripts/gen_dual.py` 已删除**
-> （单任务直接用 `chain_director_v3.py --segments 1`），其 API 模板保留为
+> **`scripts/gen_dual.py` 已删除**（单任务改用 `minimax_h3_runner.py`），其 API 模板保留为
 > `workflows/api/api_video_minimax_h3_raylight_fl2v.json`。
 
 ## 一、gen_dual.py 职责与用法
@@ -115,7 +114,7 @@ FSDP 重载 91s。其中只有 **FSDP 重载 91s 是 clear=True 引入的增量*
   0 残留补丁，默认硬清恢复、冒烟通过）。每任务 ~91s 重载为 2 卡硬约束，不建议再投入；
   结构性去掉需 raylight 上游支持或扩到 4×22G（分片与编码器同驻）。
 
-> 后续 v2 persist 模式（chain_director_v2.md）用**不重启服务的幂等 RayInitializer 复用**
+> 后续 persist 模式用**不重启服务的幂等 RayInitializer 复用**
 > 在任务内段间省掉 reload——与本节 clear=True 的每任务重载互补：任务内复用、跨任务仍清场。
 
 ### 2.4 版本锁（严格）
@@ -211,8 +210,7 @@ SM75 Sage fork 编译要点（`setup.py` 三处本地改动）：
 9. **工程化**：UI→API workflow 转换器、`gen_dual.py`/`gen.py` CLI、`start-comfyui-for-minimax-h3.sh` 参数固化、模板落盘。
 
 > 注：本节为**双卡部署适配**阶段对 raylight 的全部改动；persist 复用（nodes.py/ray_worker.py
-> reuse_epoch）是 v2 阶段新增，见 chain_director_v2.md；cond_audio/denoise-mask 逐行补丁
-> 见 audio.md。
+> reuse_epoch）与 cond_audio/denoise-mask 逐行补丁见 audio.md。
 
 ## 三、CLIP SSD-Offload 往返实验归档（2026-09-04，原文件并入）
 
@@ -283,8 +281,7 @@ RSS/VmSwap 采样。
 ### 3.7 后续做法（实验的落点）
 
 装载方向投入回报低；真正被采纳的提速是：CLIP **cond 预编译缓存**（同 prompt 段间零
-dispatch，见 chain_director_v1.md）与 **v2 persist**（同任务段间 FSDP 复用、免重载，
-见 chain_director_v2.md）。
+dispatch）与 **persist 复用**（同任务段间 FSDP 复用、免重载）。
 
 ### 3.8 产物位置
 
@@ -327,7 +324,7 @@ dispatch，见 chain_director_v1.md）与 **v2 persist**（同任务段间 FSDP 
 │   ├── api/                # API 模板（gen*.py 用；浏览器默认不列出）
 │   └── video_minimax_h3_raylight_fl2v.json / _ref2v.json / video_minimax_h3_i2v.json / video_minimax_h3_t2v.json
 ├── nodes/                  # ← ComfyUI custom_nodes/{comfyui_h3_multigpu_clip,h3_vae_unload} 软链指向这里
-├── scripts/gen_dual.py                             # 双卡 CLI
+├── scripts/minimax_h3_web.py / minimax_h3_runner.py     # Web 控制台 / 单任务 CLI
 ├── scripts/start-comfyui-for-minimax-h3.sh / stop.sh
 ├── vendor/SageAttention2_Optimized_Test/           # SM75 sage 源码（编译产物 dist/*.whl）
 └── output/video/
@@ -349,8 +346,6 @@ dispatch，见 chain_director_v1.md）与 **v2 persist**（同任务段间 FSDP 
 
 ## 六、退役说明
 
-gen.py / gen_dual.py 是单任务驱动。多段续接与素材（图锚/参考音视频）能力此后移交
-chain_director_v1/v2（见对应文档）；audio 专项结论在 audio.md。
-
-**2026-09-15：两个脚本已删除**。单任务改用 `chain_director_v3.py --segments 1`
-（常驻 UNet、int4 CLIP、cond 缓存）；本文档保留全部部署/版本锁/调优/CLIP-offload 结论。
+gen.py / gen_dual.py 是单任务驱动。**2026-09-15：两个脚本已删除**。单任务改用
+`minimax_h3_runner.py`（常驻 UNet、int4 CLIP、cond 缓存）；本文档保留全部部署/版本锁/
+调优/CLIP-offload 结论；audio 专项结论在 audio.md。

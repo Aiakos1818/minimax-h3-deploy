@@ -142,8 +142,8 @@ cat start.sh
 nodes/                            # ← ComfyUI custom_nodes/{comfyui_h3_multigpu_clip,h3_vae_unload} 软链指向这里
 workflows/                        # ← ComfyUI user/default/workflows 软链指向这里（= 浏览器的工作流列表）
 workflows/api/                    # 与 workflows/*.json 一一对应的 API 格式模板（手工 POST/curl 用；浏览器默认不列出；见 api/README.md）
-scripts/                          # chain_director_v3（续接链：UNET 常驻 + CLIP 按需上卡）/ v2（persist 对照）、web 控制台 v3_web(:8190) / v2_web(:8189)、ui2api.py（UI→API 转换）、start.sh/stop.sh（双卡启动/停止，与 ~/ComfyUI-Deploy 的同名文件一致）
-docs/                             # 部署与踩坑文档（audio / chain_director_v1-v3 / gen_dual / gen）
+scripts/                          # minimax_h3_web.py（Web 控制台 :8191）/ minimax_h3_runner.py（CLI 单任务）/ minimax_h3_edit.py、ui2api.py（UI→API 转换）、start.sh/stop.sh（双卡启动/停止，与 ~/ComfyUI-Deploy 的同名文件一致）
+docs/                             # 部署与踩坑文档（audio / gen_dual / gen）
 ```
 
 ComfyUI 引擎在另一个仓库 `~/ComfyUI-Deploy`，与本目录通过软链共享节点和工作流：
@@ -166,21 +166,15 @@ CLIP+UNET 常驻后每卡只剩 ~3.2GB，而视频 VAE 编/解码需要 ~2.4GB �
 
 第 3 条是 124 帧 i2v 能否跑通的关键：ray worker 的 `cudaMallocAsync` 池会保留采样期瞬时缓冲（124 帧约 3.9GB/卡），主进程用不上，导致下一轮条件阶段差几十 MB OOM。
 
-## 多段续接链（chain_director_v3）
+## Web 控制台（minimax_h3_web.py）
 
-`scripts/chain_director_v3.py` 在常驻底座上做连续多段（Herrgotts masked-AV 续接）：UNet 的 FSDP 分片全程驻留、段间不重载；int4 CLIP 只在条件缓存未命中时上卡——固定 prompt 的链**一次 encode，之后每段零上卡**（缓存跨段、跨进程有效）。首段支持文本或首/末帧锚图（走视频 VAE 关键帧，不需要 Qwen 视觉塔）。
+`scripts/minimax_h3_web.py` 是现行的局域网 Web 控制台（默认 `:8191`、数据目录 `.h3ref2v/`）：项目制 t2v/ref2v 生成、提示词优化、串行队列与剪辑时间线成片。细节见 [`docs/README.md`](docs/README.md)。
 
 ```bash
-~/ComfyUI-Deploy/comfyenv/bin/python scripts/chain_director_v3.py --tag film --segments 4 \
-  --dur 4 --width 864 --height 480 --steps 8 --clean --merge --prompt "..."
-# 产物 output/final_film.mp4（按 handover 元数据自动裁掉每段的不可用尾/保护头）
+~/ComfyUI-Deploy/comfyenv/bin/python scripts/minimax_h3_web.py --start   # 0.0.0.0:8191
+~/ComfyUI-Deploy/comfyenv/bin/python scripts/minimax_h3_web.py --status
+~/ComfyUI-Deploy/comfyenv/bin/python scripts/minimax_h3_web.py --stop
 ```
-
-**默认常驻**：跑完不 `stop.sh`，服务 + ray worker + 已装载 FSDP 原样留给下一轮（`--stop-when-done` 则跑完释放；失败/取消一律 stop）。复用判定看进程 pid + 状态文件 `~/MiniMax-H3-Deploy/.v3_service.json`，命中就连 `reuse_epoch` 一起沿用，不重启、不重建、不重载；空闲时每卡仍占 ~11.9G，手动 `stop.sh` 可立刻释放。
-
-实测（864×480 / 8 步）：冷启动段 1 242.8s → **复用后段 1 95.4s（2.5×）**，段 2 **135.2s**（无 OOM、零上卡）；单段帧数上限约 **226 帧**（CLIP 也常驻的旧档只有 ~107，段 2 必 OOM）。`--dur` 用 "Net New Content" 语义，续段总长 = 净新内容 + 39 帧保护上下文。
-
-Web 控制台：`scripts/chain_director_v3_web.py --start`（默认 :8190、独立数据目录 `.h3web_v3/`；原有 `chain_director_v2_web.py` 保持原样驱动 v2/ref2va，两者可并用）。细节、边界与踩坑见 [`docs/chain_director_v3.md`](docs/chain_director_v3.md)。
 
 ## 实测（864x480 / 20 步 / 模型常驻）
 

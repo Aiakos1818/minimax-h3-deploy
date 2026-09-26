@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """minimax_h3_runner.py -- one MiniMax H3 clip per invocation.
 
-Single-segment sibling of chain_director_v3.py: same resident int4-CLIP /
-int8-UNet raylight base.  Two modes:
+Single-segment CLI: resident int4-CLIP / int8-UNet raylight base.
+Two modes:
   --mode ref2v : node 133 is MiniMaxH3ReferenceToVideo; clip from a prompt plus
                  reference images / videos / audios.
   --mode t2v   : node 133 is MiniMaxH3ImageToVideo (fl2va UNet); prompt plus
