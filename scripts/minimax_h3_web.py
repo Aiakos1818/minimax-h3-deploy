@@ -4362,7 +4362,10 @@ async function refreshEdit(){
   $('eFadeOut').value=editSeq.fade_out||0;
   renderTimeline(); renderPickClips(); refreshEditJobs();
 }
-function clipLabel(rel){ return String(rel).split('/').pop(); }
+function clipLabel(rel){
+  const c=clipsCache.find(x=>x.rel===rel)||{};
+  return c.shot||c.job||String(rel).split('/').pop().replace(/\.[^.]+$/,'');
+}
 function renderTimeline(){
   const box=$('timeline');
   if(!editSeq.clips.length){ box.innerHTML='<div class="muted">时间线为空，从下方「添加片段」加入</div>'; return; }
