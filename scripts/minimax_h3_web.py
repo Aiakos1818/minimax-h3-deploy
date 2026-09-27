@@ -170,7 +170,7 @@ def llm_optimize(prompt, counts, kind=LLM_SYSTEM_PROMPT_DEFAULT):
 
 # ------------------------------------------------- image inspector (cloud VLM)
 INSPECT_SYSTEM_PROMPT = (
-    "你是严谨的 AI 绘画质检员兼提示词工程师。"
+    "你是严谨的 AI 绘画质检员。"
     "用户会给你一张 AI 生成的图片，以及生成它时使用的提示词。请检查两点："
     "1) 图片内容与提示词的符合程度；"
     "2) 图片中是否存在明显不合理的缺陷（例如手指/肢体错乱、五官或人体结构畸变、"
@@ -178,8 +178,10 @@ INSPECT_SYSTEM_PROMPT = (
     "然后只输出一个 JSON 对象（不要 markdown 代码块、不要任何多余文字），字段为："
     '{"match": 0-100 的整数（图片与提示词的符合度）, "summary": "一句话总评", '
     '"issues": ["具体缺陷1", "具体缺陷2"], '
-    '"revised_prompt": "在保留原意与风格的前提下，针对上述缺陷修改后的完整提示词"}'
-    "。issues 用中文，没有明显缺陷时为空数组；revised_prompt 必须是可直接用于图生图的完整提示词。"
+    '"edit_prompt": "在保留原图主体与构图的前提下，对这张图片进行修改的具体指令"}'
+    "。issues 用中文，没有明显缺陷时为空数组；"
+    "edit_prompt 只描述需要在图上改动、添加或删除的部分（例如“把左手手指修正为五根并自然弯曲”），"
+    "不要重述原图已有的内容，并强调保持其余部分不变；没有需要修改的地方时为空字符串。"
 )
 
 
@@ -280,7 +282,7 @@ def llm_inspect_image(prompt, image_path):
         "match": data.get("match"),
         "summary": data.get("summary") or "",
         "issues": [str(x) for x in issues] if isinstance(issues, list) else [],
-        "revised_prompt": data.get("revised_prompt") or "",
+        "edit_prompt": data.get("edit_prompt") or "",
     }
 
 
@@ -2962,7 +2964,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     <div class="optrow"><b id="inspTitle">智能检查</b><button class="ghost" onclick="closeInsp()">关闭</button></div>
     <div id="inspBody" class="muted">检查中…</div>
     <div class="optacts" id="inspActs" style="display:none">
-      <button class="ghost" onclick="inspCopy()">复制提示词</button>
+      <button class="ghost" onclick="inspCopy()">复制修改提示词</button>
       <button class="primary" id="inspUseBtn" onclick="inspRunQwen()">用 Qwen 图生图修改</button>
     </div>
   </div>
@@ -3772,8 +3774,8 @@ function renderInspResult(a, m){
   h+='<div style="margin-top:8px"><div class="muted">发现的缺陷</div><div>'+
      (issues.length? '<ul style="margin:6px 0 0 18px;padding:0">'+issues.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>'
                    : '<span style="color:var(--ok)">未发现明显缺陷</span>')+'</div></div>';
-  h+='<div style="margin-top:12px"><div class="muted">修改后的提示词（可编辑）</div>'+
-     '<textarea id="inspPrompt" class="opttext" style="min-height:140px;max-height:44vh">'+esc(a.revised_prompt||m.prompt||'')+'</textarea></div>';
+  h+='<div style="margin-top:12px"><div class="muted">修改提示词（描述要在图上改动的内容，可编辑）</div>'+
+     '<textarea id="inspPrompt" class="opttext" style="min-height:140px;max-height:44vh">'+esc(a.edit_prompt||'')+'</textarea></div>';
   h+='<div class="grid2" style="margin-top:10px">'+
      '<div><label>素材名</label><input id="inspName" value="'+esc((m.name||'图片')+'-修正')+'"></div>'+
      '<div><label>重绘强度</label><input id="inspStrength" type="number" value="0.6" min="0.05" max="1" step="0.05"></div></div>';
@@ -3784,7 +3786,7 @@ async function inspRunQwen(){
   if(!inspCtx||!curProject) return;
   const mid=inspCtx.mid;
   const prompt=($('inspPrompt').value||'').trim();
-  if(!prompt){ notice('修改后的提示词为空'); return; }
+  if(!prompt){ notice('修改提示词为空'); return; }
   const name=($('inspName').value||'').trim()||'修正图';
   const strength=$('inspStrength').value||'0.6';
   const btn=$('inspUseBtn'); btn.disabled=true; btn.textContent='提交中…';
@@ -3808,12 +3810,12 @@ function closeInsp(){
 }
 function inspCopy(){
   const t=$('inspPrompt'); if(!t) return;
-  const v=t.value; if(!v){ notice('提示词为空'); return; }
+  const v=t.value; if(!v){ notice('修改提示词为空'); return; }
   if(navigator.clipboard && navigator.clipboard.writeText){
-    navigator.clipboard.writeText(v).then(()=>notice('提示词已复制'))
-      .catch(()=>{ t.focus(); t.select(); try{ document.execCommand('copy'); notice('提示词已复制'); }
+    navigator.clipboard.writeText(v).then(()=>notice('修改提示词已复制'))
+      .catch(()=>{ t.focus(); t.select(); try{ document.execCommand('copy'); notice('修改提示词已复制'); }
         catch(e){ notice('复制失败，请手动选择文本'); } });
-  }else{ t.focus(); t.select(); try{ document.execCommand('copy'); notice('提示词已复制'); }
+  }else{ t.focus(); t.select(); try{ document.execCommand('copy'); notice('修改提示词已复制'); }
     catch(e){ notice('复制失败，请手动选择文本'); } }
 }
 function prefillImageForm(m){
