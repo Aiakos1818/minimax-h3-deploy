@@ -3173,12 +3173,18 @@ function askInput(title,value,okText,ph){
   });
 }
 function inputResolve(v){ $('inputModal').classList.remove('open'); const cb=inputCb; inputCb=null; if(cb) cb(v); }
-function nextReuseName(name){
+function nextReuseName(name, usedNames){
   name=String(name||'').trim();
   if(!name) return name;
+  let base=name, max=0;
   const m=name.match(/^(.*)-(\d+)$/);
-  if(m) return m[1]+'-'+(parseInt(m[2],10)+1);
-  return name+'-1';
+  if(m){ base=m[1]; max=parseInt(m[2],10); }
+  const re=new RegExp('^'+base.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'-(\\d+)$');
+  for(const n of (usedNames||[])){
+    const mm=String(n==null?'':n).match(re);
+    if(mm){ const v=parseInt(mm[1],10); if(v>max) max=v; }
+  }
+  return base+'-'+(max+1);
 }
 function openShotModal(title,value,okText,cb,mode){
   shotCb=cb; shotMode=(mode==='image')?'image':'shot';
@@ -3324,7 +3330,8 @@ function closeJob(){
 function reuseJob(id){
   const j=jobsById[id]; if(!j) return;
   if(!curProject){ notice('请先进入一个项目'); return; }
-  openShotModal('复制分镜', nextReuseName(j.name||''), '确定', (name)=>{ doReuse(id,name); });
+  const used=Object.values(jobsById).filter(x=>x.mode==='t2v'||x.mode==='ref2v').map(x=>x.name);
+  openShotModal('复制分镜', nextReuseName(j.name||'', used), '确定', (name)=>{ doReuse(id,name); });
 }
 async function doReuse(id,name){
   const j=jobsById[id]; if(!j) return;
@@ -3745,7 +3752,9 @@ function reuseMaterial(mid){
   const m=matById(mid); if(!m) return;
   if(!curProject){ notice('请先进入一个项目'); return; }
   if(!m.prompt){ notice('该素材没有可复制的生成参数'); return; }
-  openShotModal('复制图片素材', nextReuseName(m.name), '确定', (name)=>{ imgName=name; showImgForm(); prefillImageForm(m); },'image');
+  const used=Object.values(jobsById).filter(x=>x.mode==='t2i'||x.mode==='i2i').map(x=>x.name)
+    .concat((materials||[]).filter(x=>x.kind==='image').map(x=>x.name));
+  openShotModal('复制图片素材', nextReuseName(m.name, used), '确定', (name)=>{ imgName=name; showImgForm(); prefillImageForm(m); },'image');
 }
 let inspCtx=null;
 async function inspectImage(mid,btn){
