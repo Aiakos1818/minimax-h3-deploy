@@ -1009,6 +1009,39 @@ class Manager:
     def _job_dir(self, jid):
         return os.path.join(self.jobs_dir, jid)
 
+    def _stage_ref(self, dest_dir, src, seen):
+        """Hard-link one referenced file into the job dir (copy as a fallback)."""
+        if not src or not os.path.isfile(src):
+            return src
+        base = os.path.basename(src)
+        n = seen.get(base, 0)
+        seen[base] = n + 1
+        name = base
+        if n:
+            stem, ext = os.path.splitext(base)
+            name = "%s_%d%s" % (stem, n + 1, ext)
+        os.makedirs(dest_dir, exist_ok=True)
+        dst = os.path.join(dest_dir, name)
+        if not os.path.exists(dst):
+            try:
+                os.link(src, dst)
+            except OSError:
+                shutil.copy2(src, dst)
+        return dst
+
+    def link_refs(self, jid, cfg):
+        """Snapshot the job's referenced media into <job>/uploads so the job still
+        works after the source material/product is deleted."""
+        media = cfg.get("media") or {}
+        dest_dir = os.path.join(self._job_dir(jid), "uploads")
+        seen = {}
+        for kind, val in list(media.items()):
+            if isinstance(val, list):
+                media[kind] = [self._stage_ref(dest_dir, p, seen) for p in val]
+            elif isinstance(val, str) and val:
+                media[kind] = self._stage_ref(dest_dir, val, seen)
+        return media
+
     def persist_cfg(self, job):
         d = self._job_dir(job["id"])
         os.makedirs(d, exist_ok=True)
@@ -2208,6 +2241,7 @@ def make_handler(mgr):
             jid = mgr.new_id()
             cfg["tag"] = jid
             os.makedirs(mgr._job_dir(jid), exist_ok=True)
+            mgr.link_refs(jid, cfg)
             mgr.submit(cfg, jid=jid)
             self._json(202, {"id": jid, "status": "queued"})
 
@@ -2284,6 +2318,7 @@ def make_handler(mgr):
             jid = mgr.new_id()
             cfg["tag"] = jid
             os.makedirs(mgr._job_dir(jid), exist_ok=True)
+            mgr.link_refs(jid, cfg)
             mgr.submit(cfg, jid=jid)
             self._json(202, {"id": jid, "status": "queued"})
 
@@ -3928,17 +3963,9 @@ async function deleteMaterial(mid){
   const m=matById(mid); if(!m) return;
   const r0=await api('/api/jobs?project='+encodeURIComponent(curProject));
   const jobs=((r0&&r0.jobs)||[]);
-  const used=jobs.filter(j=>j.mode!=='edit' &&
-    Object.keys(j.media||{}).some(k=>Array.isArray(j.media[k]) &&
-      j.media[k].some(p=>String(p).split('/').pop()===m.file)));
   const task=jobs.find(j=>j.material_id===mid);
   let msg='删除素材「<b>'+esc(m.name)+'</b>」？';
   if(task) msg+='<br>将同时删除其生成任务 <b>'+esc(task.name||task.id)+'</b>。';
-  if(used.length){
-    msg+='<br><br>以下分镜列表用到了该素材：<br>'+
-      used.map(j=>'· '+esc(j.name||j.id)).join('<br>')+
-      '<br><br>删除后这些分镜的素材引用会失效。';
-  }
   const ok=await askConfirm(msg,'删除素材','删除');
   if(!ok) return;
   const r=await fetch('/api/materials/'+encodeURIComponent(curProject)+'/'+encodeURIComponent(mid)+'/delete',
