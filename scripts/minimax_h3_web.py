@@ -1620,7 +1620,9 @@ class Manager:
             rel = os.path.relpath(p, out_root).replace("\\", "/")
             if "/edit/" in rel:
                 continue
-            m = meta.get(os.path.basename(p), {})
+            m = meta.get(os.path.basename(p))
+            if not m:
+                continue          # 不属于任何分镜的散落文件（测试/基准产物）不列出
             pid = m.get("project") or self._project_from_rel(rel)
             if project is not None and pid != project:
                 continue
