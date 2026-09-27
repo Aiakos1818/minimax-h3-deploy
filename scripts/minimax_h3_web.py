@@ -3173,6 +3173,13 @@ function askInput(title,value,okText,ph){
   });
 }
 function inputResolve(v){ $('inputModal').classList.remove('open'); const cb=inputCb; inputCb=null; if(cb) cb(v); }
+function nextReuseName(name){
+  name=String(name||'').trim();
+  if(!name) return name;
+  const m=name.match(/^(.*)-(\d+)$/);
+  if(m) return m[1]+'-'+(parseInt(m[2],10)+1);
+  return name+'-1';
+}
 function openShotModal(title,value,okText,cb,mode){
   shotCb=cb; shotMode=(mode==='image')?'image':'shot';
   $('shotTitle').textContent=title||'添加分镜';
@@ -3317,7 +3324,7 @@ function closeJob(){
 function reuseJob(id){
   const j=jobsById[id]; if(!j) return;
   if(!curProject){ notice('请先进入一个项目'); return; }
-  openShotModal('复用分镜', j.name||'', '确定', (name)=>{ doReuse(id,name); });
+  openShotModal('复制分镜', nextReuseName(j.name||''), '确定', (name)=>{ doReuse(id,name); });
 }
 async function doReuse(id,name){
   const j=jobsById[id]; if(!j) return;
@@ -3331,7 +3338,7 @@ async function doReuse(id,name){
   if(p.aspect) $('aspect').value=p.aspect;
   if(p.megapixels!=null) $('megapixels').value=p.megapixels;
   if(p.ref_image_size) $('ref_image_size').value=p.ref_image_size;
-  $('seed').value='';   // 复用不沿用原 seed，留空=随机，避免复现成同样的视频
+  $('seed').value='';   // 复制不沿用原 seed，留空=随机，避免复现成同样的视频
   await refreshMaterials();
   await refreshOutputs();
   clearSelMat();
@@ -3353,7 +3360,7 @@ async function doReuse(id,name){
     return !materials.some(x=>x.file===fn) && !clipsCache.some(x=>x.name===fn);
   }));
   showTaskCard();
-  $('submitMsg').textContent='已复用分镜 '+(name||id)+(lost?'（部分素材已不在素材库/产物中，已跳过）':'（未提交）');
+  $('submitMsg').textContent='已复制分镜 '+(name||id)+(lost?'（部分素材已不在素材库/产物中，已跳过）':'（未提交）');
 }
 function friendlyErr(e){
   if(!e) return '';
@@ -3680,7 +3687,7 @@ async function refreshImageJobs(){
     if(j.status==='cancelled'||j.status==='failed'||j.status==='interrupted')
       acts+=' <button class="ghost" onclick="retryJob(\''+j.id+'\')">重新生成</button>';
     if(j.material_id) acts+=' <button class="ghost" onclick="viewMaterial(\''+j.material_id+'\')">查看</button>';
-    if(j.material_id && j.status==='done') acts+=' <button class="ghost" onclick="reuseMaterial(\''+j.material_id+'\')">复用</button>';
+    if(j.material_id && j.status==='done') acts+=' <button class="ghost" onclick="reuseMaterial(\''+j.material_id+'\')">复制</button>';
     if(j.material_id && j.status==='done') acts+=' <button class="ghost" onclick="inspectImage(\''+j.material_id+'\',this)">智能检查</button>';
     let thumb='';
     const mt=j.material_id? materials.find(m=>m.id===j.material_id) : null;
@@ -3737,8 +3744,8 @@ function detailMaterial(mid){
 function reuseMaterial(mid){
   const m=matById(mid); if(!m) return;
   if(!curProject){ notice('请先进入一个项目'); return; }
-  if(!m.prompt){ notice('该素材没有可复用的生成参数'); return; }
-  openShotModal('复用图片素材', m.name, '确定', (name)=>{ imgName=name; showImgForm(); prefillImageForm(m); },'image');
+  if(!m.prompt){ notice('该素材没有可复制的生成参数'); return; }
+  openShotModal('复制图片素材', nextReuseName(m.name), '确定', (name)=>{ imgName=name; showImgForm(); prefillImageForm(m); },'image');
 }
 let inspCtx=null;
 async function inspectImage(mid,btn){
@@ -4253,7 +4260,7 @@ async function refreshJobs(){
     if(j.status==='cancelled'||j.status==='failed'||j.status==='interrupted')
       acts+=' <button class="ghost" onclick="retryJob(\''+j.id+'\')">生成</button>';
     if(j.clip_rel) acts+=' <button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看</button>';
-    acts+=' <button class="ghost" onclick="reuseJob(\''+j.id+'\')">复用</button>';
+    acts+=' <button class="ghost" onclick="reuseJob(\''+j.id+'\')">复制</button>';
     let thumb='';
     if(j.clip_rel){
       thumb='<video class="jthumb" muted playsinline preload="none" title="'+esc(withExt(j.name||j.id, fileExt(j.clip_rel)))+'" poster="/vthumb/'+encodeURI(j.clip_rel)+
