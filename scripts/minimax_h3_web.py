@@ -46,6 +46,24 @@ VTHUMB_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_v
 QWEN_SERVER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen_image_server.py")
 QWEN_PORT = int(os.environ.get("H3_QWEN_PORT", "8193"))
 QWEN_CACHE = os.path.expanduser("~/.cache/h3qwen")
+
+
+def _pick_runtime_python():
+    """Runner/helper subprocesses need the ComfyUI env (numpy/torch/PIL).
+    Use H3_PY, else this interpreter when it already has numpy, else comfyenv."""
+    env = os.environ.get("H3_PY")
+    if env:
+        return env
+    try:
+        import numpy  # noqa: F401
+        return sys.executable
+    except Exception:
+        pass
+    cand = os.path.expanduser("~/ComfyUI-Deploy/comfyenv/bin/python")
+    return cand if os.path.isfile(cand) else sys.executable
+
+
+PYEXE = _pick_runtime_python()
 MODES = ("t2v", "ref2v")
 IMAGE_MODES = ("t2i", "i2i")
 IMAGE_MODELS = ("zimage", "qwen")
@@ -873,7 +891,7 @@ class Manager:
             return dst
         try:
             os.makedirs(self._thumbs_dir(pid), exist_ok=True)
-            argv = [sys.executable, helper, src, dst, str(maxw)]
+            argv = [PYEXE, helper, src, dst, str(maxw)]
             if cap:
                 argv.append(str(cap))
             subprocess.run(argv, check=True, timeout=90,
@@ -899,7 +917,7 @@ class Manager:
         if not fresh:
             try:
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
-                subprocess.run([sys.executable, VTHUMB_HELPER, cand, dst, str(THUMB_MAX)],
+                subprocess.run([PYEXE, VTHUMB_HELPER, cand, dst, str(THUMB_MAX)],
                                check=True, timeout=120,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception:
@@ -1230,7 +1248,7 @@ class Manager:
         mode = cfg.get("mode", "ref2v")
         if mode in IMAGE_MODES:
             driver = self.qwen_driver if cfg.get("model") == "qwen" else self.image_driver
-            a = [sys.executable, driver, "--mode", mode, "--tag", cfg["tag"],
+            a = [PYEXE, driver, "--mode", mode, "--tag", cfg["tag"],
                  "--prompt", p["prompt"], "--aspect", p["aspect"],
                  "--megapixels", str(p["megapixels"]), "--steps", str(p["steps"]),
                  "--out", os.path.join(self._out_dir(mode, cfg.get("project")),
@@ -1243,7 +1261,7 @@ class Manager:
             if cfg.get("seed") is not None:
                 a += ["--seed", str(cfg["seed"])]
             return a
-        a = [sys.executable, self.driver, "--mode", mode, "--tag", cfg["tag"],
+        a = [PYEXE, self.driver, "--mode", mode, "--tag", cfg["tag"],
              "--prompt", p["prompt"],
              "--dur", str(p["dur"]), "--aspect", p["aspect"],
              "--megapixels", str(p["megapixels"]), "--multiple", str(p["multiple"]),
@@ -1416,7 +1434,7 @@ class Manager:
         try:
             logf = open(qwen_logfile(self.qwen_port), "ab", buffering=0)
             self._qwen_proc = subprocess.Popen(
-                [sys.executable, self.qwen_server, "--port", str(self.qwen_port)],
+                [PYEXE, self.qwen_server, "--port", str(self.qwen_port)],
                 cwd=self.root, stdin=subprocess.DEVNULL, stdout=logf,
                 stderr=subprocess.STDOUT, start_new_session=True)
         except Exception as e:
@@ -1740,7 +1758,7 @@ class Manager:
         with open(sp, "w", encoding="utf-8") as f:
             json.dump(rseq, f, ensure_ascii=False)
         driver = os.path.join(self.root, "scripts", "minimax_h3_edit.py")
-        return [sys.executable, driver, "--seq", sp, "--out", out_path]
+        return [PYEXE, driver, "--seq", sp, "--out", out_path]
 
     def _edit_total_frames(self, job):
         try:
