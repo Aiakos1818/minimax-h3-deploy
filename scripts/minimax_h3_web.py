@@ -168,6 +168,122 @@ def llm_optimize(prompt, counts, kind=LLM_SYSTEM_PROMPT_DEFAULT):
     return (True, text) if text else (False, "云端返回为空")
 
 
+# ------------------------------------------------- image inspector (cloud VLM)
+INSPECT_SYSTEM_PROMPT = (
+    "你是严谨的 AI 绘画质检员兼提示词工程师。"
+    "用户会给你一张 AI 生成的图片，以及生成它时使用的提示词。请检查两点："
+    "1) 图片内容与提示词的符合程度；"
+    "2) 图片中是否存在明显不合理的缺陷（例如手指/肢体错乱、五官或人体结构畸变、"
+    "多余或缺失的物体、物理与透视错误、光影矛盾、文字乱码等）。"
+    "然后只输出一个 JSON 对象（不要 markdown 代码块、不要任何多余文字），字段为："
+    '{"match": 0-100 的整数（图片与提示词的符合度）, "summary": "一句话总评", '
+    '"issues": ["具体缺陷1", "具体缺陷2"], '
+    '"revised_prompt": "在保留原意与风格的前提下，针对上述缺陷修改后的完整提示词"}'
+    "。issues 用中文，没有明显缺陷时为空数组；revised_prompt 必须是可直接用于图生图的完整提示词。"
+)
+
+
+def load_vlm_conf():
+    """Vision model config: vision_* lines in llm.conf > REF2V_VLM_* env > llm.conf base/key."""
+    conf = load_llm_conf()
+    kv = {}
+    try:
+        with open(LLM_CONF_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                kv[k.strip().lower()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return {
+        "base": kv.get("vision_base") or os.environ.get("REF2V_VLM_BASE") or conf["base"],
+        "model": kv.get("vision_model") or os.environ.get("REF2V_VLM_MODEL") or "deepseek-flash",
+        "key": kv.get("vision_key") or os.environ.get("REF2V_VLM_KEY") or conf["key"],
+    }
+
+
+def _parse_json_object(text):
+    """Best-effort parse of the first JSON object in a model reply (tolerates fences/prose)."""
+    text = re.sub(r"^```[a-zA-Z0-9]*\s*", "", (text or "").strip())
+    text = re.sub(r"\s*```$", "", text).strip()
+    start = text.find("{")
+    if start < 0:
+        return None
+    dec = json.JSONDecoder(strict=False)
+    try:
+        obj, _ = dec.raw_decode(text[start:])
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", text, re.S)
+    if m:
+        try:
+            obj = json.loads(m.group(0), strict=False)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+    return None
+
+
+def llm_inspect_image(prompt, image_path):
+    conf = load_vlm_conf()
+    if not conf["key"]:
+        return False, ("未配置云端 API key：请在 %s 写 key=...，或设置环境变量 REF2V_VLM_KEY"
+                       % LLM_CONF_PATH)
+    try:
+        with open(image_path, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        return False, "读取图片失败: %r" % e
+    if not raw:
+        return False, "图片文件为空"
+    mime = mimetypes.guess_type(image_path)[0] or "image/png"
+    data_url = "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode("ascii"))
+    user_text = "生成该图片时使用的提示词：\n%s\n\n请检查这张图片。" % (prompt or "（未记录提示词）")
+    payload = {"model": conf["model"], "temperature": 0.3, "stream": False,
+               "messages": [
+                   {"role": "system", "content": INSPECT_SYSTEM_PROMPT},
+                   {"role": "user", "content": [
+                       {"type": "text", "text": user_text},
+                       {"type": "image_url", "image_url": {"url": data_url}},
+                   ]},
+               ]}
+    req = urllib.request.Request(
+        conf["base"].rstrip("/") + "/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + conf["key"]},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            resp = json.loads(r.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            detail = ""
+        return False, "云端 API 错误 %s %s" % (e.code, detail)
+    except Exception as e:
+        return False, "调用云端失败: %r" % e
+    try:
+        text = (resp["choices"][0]["message"]["content"] or "").strip()
+    except Exception:
+        return False, "云端返回格式异常: %s" % json.dumps(resp, ensure_ascii=False)[:300]
+    data = _parse_json_object(text)
+    if data is None:
+        return False, "云端未返回有效 JSON: %s" % text[:300]
+    issues = data.get("issues")
+    return True, {
+        "match": data.get("match"),
+        "summary": data.get("summary") or "",
+        "issues": [str(x) for x in issues] if isinstance(issues, list) else [],
+        "revised_prompt": data.get("revised_prompt") or "",
+    }
+
+
 def ref2v_length(dur):
     base = max(5, int(round(dur * FPS)))
     return base + ((5 - base) % 17)
@@ -1950,6 +2066,13 @@ def make_handler(mgr):
                 except Exception:
                     self._err(400, "bad json"); return
                 self._api_image(js); return
+            if u.path == "/api/images/inspect":
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    js = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                except Exception:
+                    self._err(400, "bad json"); return
+                self._api_image_inspect(js); return
             if u.path == "/api/materials":
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
@@ -2164,6 +2287,22 @@ def make_handler(mgr):
             mgr.submit(cfg, jid=jid)
             self._json(202, {"id": jid, "status": "queued"})
 
+        def _api_image_inspect(self, js):
+            project = (js.get("project") or DEFAULT_PROJECT) or DEFAULT_PROJECT
+            if project not in mgr.projects:
+                self._err(400, "项目不存在"); return
+            mid = js.get("material_id") or ""
+            mats = (mgr.projects.get(project) or {}).get("materials") or []
+            ent = next((m for m in mats if m.get("id") == mid), None)
+            path = mgr.material_path(project, mid)
+            if not ent or not path or (ent.get("kind") or "image") != "image":
+                self._err(400, "请选择有效的图片素材"); return
+            ok, res = llm_inspect_image(ent.get("prompt") or "", path)
+            if not ok:
+                self._err(502, res); return
+            res["material_id"] = mid
+            self._json(200, {"ok": True, "analysis": res})
+
     return H
 
 
@@ -2334,6 +2473,11 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
 .viewbody img{display:block;margin:0 auto;max-width:100%;max-height:82vh;border-radius:8px}
 .viewbody video{display:block;width:100%;max-height:82vh;background:#000;border-radius:8px}
 .viewbody audio{width:100%}
+.viewstage{position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;
+           cursor:grab;touch-action:none;-webkit-user-select:none;user-select:none}
+.viewstage.grabbing{cursor:grabbing}
+.viewstage img{max-width:100%;max-height:82vh;transform-origin:center center;will-change:transform;
+               -webkit-user-drag:none;user-select:none;pointer-events:auto}
 .matcard .mb{grid-area:mb;padding:6px 9px 8px;min-width:0}
 .matcard .nm{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .matcard .mm{font-size:11px;color:var(--mut);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -2775,6 +2919,16 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
   <div class="box" style="width:min(720px,96vw);max-height:88vh;overflow:auto">
     <div class="optrow"><b id="jTitle">分镜详情</b><button class="ghost" onclick="closeJob()">关闭</button></div>
     <div id="jBody"></div>
+  </div>
+</div>
+<div class="modal" id="inspModal" onclick="if(event.target===this)closeInsp()">
+  <div class="box" style="width:min(720px,96vw);max-height:88vh;overflow:auto">
+    <div class="optrow"><b id="inspTitle">智能检查</b><button class="ghost" onclick="closeInsp()">关闭</button></div>
+    <div id="inspBody" class="muted">检查中…</div>
+    <div class="optacts" id="inspActs" style="display:none">
+      <button class="ghost" onclick="inspCopy()">复制提示词</button>
+      <button class="primary" id="inspUseBtn" onclick="inspRunQwen()">用 Qwen 图生图修改</button>
+    </div>
   </div>
 </div>
 <div class="modal" id="logModal" onclick="if(event.target===this)closeLog()">
@@ -3489,6 +3643,7 @@ async function refreshImageJobs(){
       acts+=' <button class="ghost" onclick="retryJob(\''+j.id+'\')">重新生成</button>';
     if(j.material_id) acts+=' <button class="ghost" onclick="viewMaterial(\''+j.material_id+'\')">查看</button>';
     if(j.material_id && j.status==='done') acts+=' <button class="ghost" onclick="reuseMaterial(\''+j.material_id+'\')">复用</button>';
+    if(j.material_id && j.status==='done') acts+=' <button class="ghost" onclick="inspectImage(\''+j.material_id+'\',this)">智能检查</button>';
     let thumb='';
     const mt=j.material_id? materials.find(m=>m.id===j.material_id) : null;
     if(mt && mt.exists){
@@ -3546,6 +3701,84 @@ function reuseMaterial(mid){
   if(!curProject){ notice('请先进入一个项目'); return; }
   if(!m.prompt){ notice('该素材没有可复用的生成参数'); return; }
   openShotModal('复用图片素材', m.name, '确定', (name)=>{ imgName=name; showImgForm(); prefillImageForm(m); },'image');
+}
+let inspCtx=null;
+async function inspectImage(mid,btn){
+  const m=matById(mid); if(!m){ notice('素材不存在'); return; }
+  if(!m.exists){ notice('素材文件缺失：'+(m.name||'')); return; }
+  inspCtx={mid};
+  $('inspTitle').textContent='智能检查 · '+(m.name||'');
+  $('inspBody').className='muted';
+  $('inspBody').innerHTML='云端检查中…（分析图片与提示词的符合程度、查找明显缺陷）';
+  $('inspActs').style.display='none';
+  $('inspModal').classList.add('open');
+  if(btn) btn.disabled=true;
+  let r=null, j={};
+  try{
+    r=await fetch('/api/images/inspect',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({project:curProject, material_id:mid})});
+    j=await r.json().catch(()=>({}));
+  }catch(e){ j={error:String(e)}; }
+  if(btn) btn.disabled=false;
+  if(!r || !r.ok || !j.analysis){
+    $('inspBody').className='';
+    $('inspBody').innerHTML='<div style="color:var(--err)">检查失败：'+
+      esc((j&&(j.error||j.msg))||('HTTP '+(r?r.status:'?')))+'</div>';
+    return;
+  }
+  renderInspResult(j.analysis, m);
+}
+function renderInspResult(a, m){
+  const issues=(a.issues||[]);
+  const mt=(a.match!=null && a.match!=='')? (a.match+' / 100') : '—';
+  let h='<div class="detrow"><span class="muted">图片与提示词符合度</span><span>'+esc(String(mt))+'</span></div>';
+  if(a.summary) h+='<div style="margin-top:8px"><div class="muted">总评</div><div>'+esc(a.summary)+'</div></div>';
+  h+='<div style="margin-top:8px"><div class="muted">发现的缺陷</div><div>'+
+     (issues.length? '<ul style="margin:6px 0 0 18px;padding:0">'+issues.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>'
+                   : '<span style="color:var(--ok)">未发现明显缺陷</span>')+'</div></div>';
+  h+='<div style="margin-top:12px"><div class="muted">修改后的提示词（可编辑）</div>'+
+     '<textarea id="inspPrompt" class="opttext" style="min-height:140px;max-height:44vh">'+esc(a.revised_prompt||m.prompt||'')+'</textarea></div>';
+  h+='<div class="grid2" style="margin-top:10px">'+
+     '<div><label>素材名</label><input id="inspName" value="'+esc((m.name||'图片')+'-修正')+'"></div>'+
+     '<div><label>重绘强度</label><input id="inspStrength" type="number" value="0.6" min="0.05" max="1" step="0.05"></div></div>';
+  const b=$('inspBody'); b.className=''; b.innerHTML=h;
+  $('inspActs').style.display='';
+}
+async function inspRunQwen(){
+  if(!inspCtx||!curProject) return;
+  const mid=inspCtx.mid;
+  const prompt=($('inspPrompt').value||'').trim();
+  if(!prompt){ notice('修改后的提示词为空'); return; }
+  const name=($('inspName').value||'').trim()||'修正图';
+  const strength=$('inspStrength').value||'0.6';
+  const btn=$('inspUseBtn'); btn.disabled=true; btn.textContent='提交中…';
+  let r=null, j={};
+  try{
+    r=await fetch('/api/images',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({project:curProject, name, mode:'i2i', model:'qwen', prompt,
+        init:mid, strength, megapixels:'0.4', steps:'8'})});
+    j=await r.json().catch(()=>({}));
+  }catch(e){ j={error:String(e)}; }
+  btn.disabled=false; btn.textContent='用 Qwen 图生图修改';
+  if(!r || !r.ok){ notice('提交失败：'+((j&&(j.error||j.msg))||('HTTP '+(r?r.status:'?')))); return; }
+  closeInsp();
+  $('imgJobs')._sig=null; refreshImageJobs();
+  notice('已提交 Qwen 图生图任务：'+(j.id||''));
+}
+function closeInsp(){
+  $('inspModal').classList.remove('open');
+  $('inspBody').innerHTML=''; $('inspActs').style.display='none';
+  inspCtx=null;
+}
+function inspCopy(){
+  const t=$('inspPrompt'); if(!t) return;
+  const v=t.value; if(!v){ notice('提示词为空'); return; }
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(v).then(()=>notice('提示词已复制'))
+      .catch(()=>{ t.focus(); t.select(); try{ document.execCommand('copy'); notice('提示词已复制'); }
+        catch(e){ notice('复制失败，请手动选择文本'); } });
+  }else{ t.focus(); t.select(); try{ document.execCommand('copy'); notice('提示词已复制'); }
+    catch(e){ notice('复制失败，请手动选择文本'); } }
 }
 function prefillImageForm(m){
   const mode=(m.gen==='i2i')?'i2i':'t2i';
@@ -4226,13 +4459,46 @@ function play(rel){ $('mvideo').src='/files/'+encodeURI(rel); $('mcap').textCont
 function closeModal(){ $('mvideo').pause(); $('mvideo').src=''; $('modal').classList.remove('open'); }
 
 function previewUrl(pid,file,v,name){ return '/preview/'+encodeURIComponent(pid)+'/'+encodeURIComponent(String(file).split('/').pop())+tailName(name)+(v?'?v='+v:''); }
+function enableImgZoom(stage,img){
+  const MIN=1,MAX=10; let s=1,tx=0,ty=0;
+  let dragging=false,px=0,py=0,ptx=0,pty=0;
+  const apply=()=>{ img.style.transform='translate('+tx+'px,'+ty+'px) scale('+s+')'; };
+  img.draggable=false;
+  stage.addEventListener('wheel',(e)=>{
+    e.preventDefault();
+    const r=stage.getBoundingClientRect();
+    const dx=e.clientX-(r.left+r.width/2), dy=e.clientY-(r.top+r.height/2);
+    const ns=Math.min(MAX,Math.max(MIN,s*Math.exp(-e.deltaY*0.0015)));
+    if(ns===s) return;
+    const k=ns/s; tx=dx-k*(dx-tx); ty=dy-k*(dy-ty); s=ns;
+    if(s<=MIN){ tx=0; ty=0; }
+    apply();
+  },{passive:false});
+  stage.addEventListener('pointerdown',(e)=>{
+    if(e.button!==0) return;
+    dragging=true; px=e.clientX; py=e.clientY; ptx=tx; pty=ty;
+    stage.classList.add('grabbing');
+    try{ stage.setPointerCapture(e.pointerId); }catch(_){}
+    e.preventDefault();
+  });
+  stage.addEventListener('pointermove',(e)=>{
+    if(!dragging) return;
+    tx=ptx+(e.clientX-px); ty=pty+(e.clientY-py); apply();
+  });
+  const end=(e)=>{ if(!dragging) return; dragging=false; stage.classList.remove('grabbing');
+    if(s<=MIN){ tx=0; ty=0; apply(); }
+    try{ stage.releasePointerCapture(e.pointerId); }catch(_){} };
+  stage.addEventListener('pointerup',end);
+  stage.addEventListener('pointercancel',end);
+  stage.addEventListener('dblclick',(e)=>{ e.preventDefault(); s=1; tx=0; ty=0; apply(); });
+}
 function openViewer(kind,name,o){
   o=o||{};
   const isImg=kind==='image';
   $('viewOrig').style.display = (isImg && o.preview && o.orig) ? '' : 'none';
   let h;
   if(isImg){
-    h='<img src="'+esc(o.src)+'"'+(o.preview?' data-preview="'+esc(o.preview)+'"':'')+(o.orig?' data-orig="'+esc(o.orig)+'"':'')+'>';
+    h='<div class="viewstage"><img src="'+esc(o.src)+'"'+(o.preview?' data-preview="'+esc(o.preview)+'"':'')+(o.orig?' data-orig="'+esc(o.orig)+'"':'')+'></div>';
   }else if(kind==='video'){
     h='<video controls autoplay playsinline title="'+esc(name)+'" src="'+esc(o.orig)+'"></video>';
   }else{
@@ -4242,6 +4508,10 @@ function openViewer(kind,name,o){
   $('viewBody').innerHTML=h;
   $('viewBody').querySelectorAll('video,audio').forEach(x=>x.play().catch(()=>{}));
   $('viewModal').classList.add('open');
+  if(isImg){
+    const st=$('viewBody').querySelector('.viewstage'), im=st&&st.querySelector('img');
+    if(st&&im) enableImgZoom(st,im);
+  }
   if(isImg && o.preview){
     const el=$('viewBody').querySelector('img');
     if(el){ const pre=new Image(); pre.onload=()=>{ if(el.isConnected) el.src=pre.src; }; pre.src=o.preview; }
