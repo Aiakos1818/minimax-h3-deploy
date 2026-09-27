@@ -2846,7 +2846,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     </div>
   </div>
 </main>
-<div class="modal" id="pickModal" onclick="if(event.target===this)closePick()">
+<div class="modal" id="pickModal">
   <div class="box" style="width:min(900px,98vw);max-height:88vh;overflow:auto">
     <div class="optrow"><b id="pickTitle">选择素材</b><span class="optbtns"><button class="ghost" id="pickAddBtn" onclick="pickAddOpen()">添加素材</button><button class="ghost" onclick="closePick()">关闭</button></span></div>
     <div class="muted" id="pickHint" style="margin-bottom:8px"></div>
@@ -2857,13 +2857,14 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     </div>
   </div>
 </div>
-<div class="modal" id="modal" onclick="if(event.target===this)closeModal()">
+<div class="modal" id="modal">
   <div class="box">
+    <div class="optrow"><b>预览</b><button class="ghost" onclick="closeModal()">关闭</button></div>
     <video id="mvideo" controls playsinline webkit-playsinline></video>
     <div class="muted" id="mcap" style="margin-top:8px"></div>
   </div>
 </div>
-<div class="modal" id="viewModal" onclick="if(event.target===this)closeView()">
+<div class="modal" id="viewModal">
   <div class="box" style="width:min(1100px,98vw)">
     <div class="optrow"><b id="viewCap"></b>
       <span style="display:flex;gap:8px;flex:0 0 auto">
@@ -2874,7 +2875,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     <div id="viewBody" class="viewbody"></div>
   </div>
 </div>
-<div class="modal" id="optModal" onclick="if(event.target===this)closeOpt()">
+<div class="modal" id="optModal">
   <div class="box">
     <div class="optrow"><b>提示词优化</b><button class="ghost" onclick="closeOpt()">关闭</button></div>
     <div class="muted" id="optMsg" style="margin-bottom:8px"></div>
@@ -2885,7 +2886,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     </div>
   </div>
 </div>
-<div class="modal" id="delModal" onclick="if(event.target===this)closeDel()">
+<div class="modal" id="delModal">
   <div class="box" style="width:min(420px,96vw)">
     <div class="optrow"><b>删除项目</b><button class="ghost" onclick="closeDel()">关闭</button></div>
     <div class="muted" id="delMsg" style="margin-bottom:12px"></div>
@@ -2899,7 +2900,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     </div>
   </div>
 </div>
-<div class="modal" id="noticeModal" onclick="if(event.target===this)closeNotice()">
+<div class="modal" id="noticeModal">
   <div class="box" style="width:min(420px,96vw)">
     <div class="optrow"><b id="noticeTitle">提示</b><button class="ghost" onclick="closeNotice()">关闭</button></div>
     <div class="muted" id="noticeMsg" style="margin-bottom:14px;white-space:pre-wrap;word-break:break-word"></div>
@@ -2908,9 +2909,9 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     </div>
   </div>
 </div>
-<div class="modal" id="askModal" onclick="if(event.target===this)askResolve(false)">
+<div class="modal" id="askModal">
   <div class="box" style="width:min(420px,96vw)">
-    <div class="optrow"><b id="askTitle">确认</b></div>
+    <div class="optrow"><b id="askTitle">确认</b><button class="ghost" onclick="askResolve(false)">关闭</button></div>
     <div class="muted" id="askMsg" style="margin-bottom:14px"></div>
     <div class="optacts">
       <button class="ghost" onclick="askResolve(false)">取消</button>
@@ -2918,7 +2919,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     </div>
   </div>
 </div>
-<div class="modal" id="inputModal" onclick="if(event.target===this)inputResolve(null)">
+<div class="modal" id="inputModal">
   <div class="box" style="width:min(420px,96vw)">
     <div class="optrow"><b id="inputTitle">输入</b><button class="ghost" onclick="inputResolve(null)">关闭</button></div>
     <input id="inputVal" onkeydown="if(event.key==='Enter'){event.preventDefault();inputResolve($('inputVal').value)}">
@@ -2930,7 +2931,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
 </div>
 <div class="modal" id="upModal">
   <div class="box" style="width:min(420px,96vw)">
-    <div class="optrow"><b>上传素材</b></div>
+    <div class="optrow"><b>上传素材</b><button class="ghost" onclick="cancelUpload()">关闭</button></div>
     <div class="muted" id="upName" style="margin-bottom:8px;word-break:break-all"></div>
     <div class="bar"><i id="upFill"></i></div>
     <div class="muted" id="upPct">0%</div>
@@ -2939,7 +2940,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     </div>
   </div>
 </div>
-<div class="modal" id="shotModal" onclick="if(event.target===this)closeShotModal()">
+<div class="modal" id="shotModal">
   <div class="box" style="width:min(420px,96vw)">
     <div class="optrow"><b id="shotTitle">添加分镜</b><button class="ghost" onclick="closeShotModal()">关闭</button></div>
     <input id="shotVal" onkeydown="if(event.key==='Enter'){event.preventDefault();confirmShot()}">
@@ -2950,13 +2951,13 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     </div>
   </div>
 </div>
-<div class="modal" id="jobModal" onclick="if(event.target===this)closeJob()">
+<div class="modal" id="jobModal">
   <div class="box" style="width:min(720px,96vw);max-height:88vh;overflow:auto">
     <div class="optrow"><b id="jTitle">分镜详情</b><button class="ghost" onclick="closeJob()">关闭</button></div>
     <div id="jBody"></div>
   </div>
 </div>
-<div class="modal" id="inspModal" onclick="if(event.target===this)closeInsp()">
+<div class="modal" id="inspModal">
   <div class="box" style="width:min(720px,96vw);max-height:88vh;overflow:auto">
     <div class="optrow"><b id="inspTitle">智能检查</b><button class="ghost" onclick="closeInsp()">关闭</button></div>
     <div id="inspBody" class="muted">检查中…</div>
@@ -2966,7 +2967,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
     </div>
   </div>
 </div>
-<div class="modal" id="logModal" onclick="if(event.target===this)closeLog()">
+<div class="modal" id="logModal">
   <div class="box" style="width:min(960px,98vw)">
     <div class="optrow"><b>诊断日志</b><button class="ghost" onclick="closeLog()">关闭</button></div>
     <pre class="log" id="log" style="height:60vh;max-height:60vh"></pre>
