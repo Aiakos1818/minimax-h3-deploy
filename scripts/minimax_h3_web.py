@@ -1182,6 +1182,36 @@ class Manager:
                     self._cv.notify()
             return jid
 
+    def update_job(self, jid, cfg, queue=True):
+        """Replace a not-yet-started shot's config (in-place edit). Keeps its id
+        and submit/save time; 保存 keeps it saved, 提交 queues it."""
+        with self.lock:
+            job = self.jobs.get(jid)
+            if not job:
+                return False, "分镜不存在"
+            st = job["st"]
+            if st.get("status") in ("running", "queued", "done"):
+                return False, "仅未开始的分镜可以编辑"
+            for k in ("progress", "detail", "clip_rel", "clip_size", "clip_frames",
+                      "clip_seconds", "duration", "ended", "err",
+                      "image_rel", "material_id", "material_name", "stage",
+                      "cancel_requested"):
+                st.pop(k, None)
+            cfg["tag"] = jid
+            job["cfg"] = cfg
+            st.update(status="queued" if queue else "saved", run_ts=time.time(),
+                      mode=cfg.get("mode", "ref2v"),
+                      project=cfg.get("project", DEFAULT_PROJECT),
+                      name=cfg.get("name") or None, params=cfg["params"],
+                      seed=cfg["seed"], media=cfg["media"])
+            self.persist_cfg(job)
+            self.persist_status(job)
+            if queue:
+                self.queue.append(jid)
+                with self._cv:
+                    self._cv.notify()
+        return True, ("已提交生成" if queue else "已保存")
+
     def check_shot_refs(self, refs):
         """Validate that referenced shots already produced a usable clip."""
         with self.lock:
@@ -2257,11 +2287,18 @@ def make_handler(mgr):
             if mode not in MODES:
                 mode = "ref2v"
             save = bool(_first(fields, "save"))
+            update = (_first(fields, "update", "") or "").strip()
+            if update:
+                uj = mgr.jobs.get(update)
+                if not uj:
+                    self._err(404, "分镜不存在"); return
+                if uj["st"].get("status") in ("running", "queued", "done"):
+                    self._err(409, "仅未开始的分镜可以编辑"); return
             project = _first(fields, "project", DEFAULT_PROJECT) or DEFAULT_PROJECT
             if project not in mgr.projects:
                 self._err(400, "项目不存在"); return
             name = (_first(fields, "name", "") or "").strip()[:60]
-            if name and mgr.name_taken(project, name):
+            if name and mgr.name_taken(project, name, keep=update or None):
                 self._err(409, "已存在同名分镜：%s" % name); return
             ids = {k: [x for x in (fields.get(k) or []) if x] for k in MEDIA_KINDS}
             frame_ids = {k: (_first(fields, k) or None) for k in FRAME_KINDS}
@@ -2352,11 +2389,16 @@ def make_handler(mgr):
                 "media": media,
                 "shot_refs": shot_refs,
             }
-            jid = mgr.new_id()
+            jid = update or mgr.new_id()
             cfg["tag"] = jid
             os.makedirs(mgr._job_dir(jid), exist_ok=True)
             mgr.link_refs(jid, cfg)
-            mgr.submit(cfg, jid=jid, queue=not save)
+            if update:
+                ok, msg = mgr.update_job(jid, cfg, queue=not save)
+                if not ok:
+                    self._err(409, msg); return
+            else:
+                mgr.submit(cfg, jid=jid, queue=not save)
             self._json(202, {"id": jid, "status": "saved" if save else "queued"})
 
         def _check_ref_limits(self, project, ids, ref_path, n):
@@ -3105,7 +3147,7 @@ const $ = (id)=>document.getElementById(id);
 const esc = (s)=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ASPECTS = __ASPECTS__;
 let logOffset = 0, lastJob = null, jobsById = {};
-let shotName = null, shotCb = null, shotMode = 'shot', imgName = null;
+let shotName = null, shotCb = null, shotMode = 'shot', imgName = null, editingJob = null;
 let projects = [], projNames = {}, curProject = null, projectsLoaded = false;
 let clipsCache = [];
 let editSeq={aspect:'0',fade_in:0,fade_out:0,clips:[]}, editAvail=[], editLast=null, editLogOff=0;
@@ -3213,7 +3255,7 @@ function route(){
     renderProjHead();
     refreshMaterials();
     if(edit){ refreshEdit(); }
-    else if(!image){ $('taskCard').style.display='none'; shotName=null; $('shotLabel').textContent=''; refreshJobs(); refreshOutputs(); }
+    else if(!image){ $('taskCard').style.display='none'; shotName=null; editingJob=null; $('shotLabel').textContent=''; refreshJobs(); refreshOutputs(); }
   }else{
     curProject=null;
     $('homeView').style.display=''; $('projView').style.display='none'; $('editView').style.display='none';
@@ -3341,7 +3383,7 @@ async function confirmShot(){
 }
 function addShot(){
   if(!curProject){ notice('请先进入一个项目'); return; }
-  openShotModal('输入分镜名','','确定',(name)=>{ shotName=name; showTaskCard(); });
+  openShotModal('输入分镜名','','确定',(name)=>{ shotName=name; editingJob=null; showTaskCard(); });
 }
 function showTaskCard(){
   $('taskCard').style.display='';
@@ -3466,11 +3508,26 @@ function reuseJob(id){
   const used=Object.values(jobsById).filter(x=>x.mode==='t2v'||x.mode==='ref2v').map(x=>x.name);
   openShotModal('复制分镜', nextReuseName(j.name||'', used), '确定', (name)=>{ doReuse(id,name); });
 }
+async function editJob(id){
+  const j=jobsById[id]; if(!j) return;
+  if(!curProject){ notice('请先进入一个项目'); return; }
+  if(j.status==='running'||j.status==='queued'||j.status==='done'||j.clip_rel){ notice('仅未开始的分镜可以编辑'); return; }
+  const lost=await fillShotForm(j, j.name||'', id);
+  window.scrollTo({top:0, behavior:'smooth'});
+  $('submitMsg').textContent='编辑分镜 '+(j.name||id)+(lost?'（部分素材已不在素材库/产物中，已跳过）':'')+
+    '：点「保存」更新，「提交」直接生成，或点「取消」放弃。';
+}
 async function doReuse(id,name){
   const j=jobsById[id]; if(!j) return;
+  const lost=await fillShotForm(j, name, null);
+  $('submitMsg').textContent='已复制分镜 '+(name||id)+(lost?'（部分素材已不在素材库/产物中，已跳过）':'（未提交）');
+}
+// Load a shot's params and reference selections into the task form.
+// editingId is set for in-place editing (保存 updates that shot); null for a copy.
+async function fillShotForm(j, name, editingId){
   const p=j.params||{}, m=j.media||{};
-  shotName=name;
-  $('submitMsg').textContent='正在载入分镜 '+id+' 的素材…';
+  shotName=name; editingJob=editingId||null;
+  $('submitMsg').textContent='正在载入分镜 '+j.id+' 的素材…';
   $('mode').value=(j.mode==='ref2v')?'ref2v':'t2v'; onModeChange();
   $('prompt').value=p.prompt||'';
   if(p.dur!=null) $('dur').value=p.dur;
@@ -3478,7 +3535,7 @@ async function doReuse(id,name){
   if(p.aspect) $('aspect').value=p.aspect;
   if(p.megapixels!=null) $('megapixels').value=p.megapixels;
   if(p.ref_image_size) $('ref_image_size').value=p.ref_image_size;
-  $('seed').value='';   // 复制不沿用原 seed，留空=随机，避免复现成同样的视频
+  $('seed').value='';   // 复制/编辑不沿用原 seed，留空=随机，避免复现成同样的视频
   await refreshMaterials();
   await refreshOutputs();
   clearSelMat();
@@ -3491,20 +3548,20 @@ async function doReuse(id,name){
       if(mt){ ids.push(mt.id); continue; }
       const c=clipsCache.find(x=>x.name===fn);
       if(c){ cls.push(c.rel); continue; }
-      if(String(path).indexOf('/uploads/')>=0) jobs.push('job:'+id+'/'+fn);
+      if(String(path).indexOf('/uploads/')>=0) jobs.push('job:'+j.id+'/'+fn);
     }
     selMat[kind]=ids; selClip[kind]=cls; selJob[kind]=jobs;
   };
   ['ref_image','ref_video','ref_audio','first_frame','last_frame'].forEach(match);
   selShot.ref_video=(j.shot_refs||[]).filter(x=>jobsById[x]);
   renderAllSlots();
-  let lost=Object.keys(m).some(k=>Array.isArray(m[k]) && m[k].length && m[k].some(p=>{
+  const lost=Object.keys(m).some(k=>Array.isArray(m[k]) && m[k].length && m[k].some(p=>{
     const fn=String(p).split('/').pop();
     return !materials.some(x=>x.file===fn) && !clipsCache.some(x=>x.name===fn)
            && String(p).indexOf('/uploads/')<0;
   }));
   showTaskCard();
-  $('submitMsg').textContent='已复制分镜 '+(name||id)+(lost?'（部分素材已不在素材库/产物中，已跳过）':'（未提交）');
+  return lost;
 }
 function friendlyErr(e){
   if(!e) return '';
@@ -4345,6 +4402,7 @@ function buildShotForm(){
   const fd=new FormData();
   fd.append('project', curProject);
   fd.append('mode', mode);
+  if(editingJob) fd.append('update', editingJob);
   if(shotName) fd.append('name', shotName);
   fd.append('prompt', prompt);
   fd.append('dur', $('dur').value); fd.append('steps', $('steps').value);
@@ -4397,7 +4455,7 @@ function postShot(fd, save){
     $('submitBtn').disabled=false; if($('saveBtn')) $('saveBtn').disabled=false;
     try{ const r=JSON.parse(xhr.responseText);
       if(xhr.status===202){ $('submitMsg').textContent= save? ('已保存: '+r.id) : ('已提交: '+r.id);
-        $('prompt').value=''; shotName=null; $('shotLabel').textContent=''; $('taskCard').style.display='none'; }
+        $('prompt').value=''; shotName=null; editingJob=null; $('shotLabel').textContent=''; $('taskCard').style.display='none'; }
       else notice((save?'保存失败: ':'提交失败: ')+(r.error||xhr.status));
     }catch(e){ notice((save?'保存失败: ':'提交失败: ')+xhr.status); }
     setTimeout(()=>{ $('prog').style.display='none'; },600);
@@ -4408,6 +4466,7 @@ function postShot(fd, save){
 }
 
 function clearTaskForm(){
+  editingJob=null;
   $('mode').value='t2v'; onModeChange();
   $('prompt').value='';
   $('dur').value=5; $('steps').value=8; $('seed').value='';
@@ -4488,12 +4547,19 @@ async function refreshJobs(){
     const line2 = [MODE_CN[j.mode]||'', info, usedTxt].filter(Boolean).join(' · ');
     const note = j.status==='failed'? '<span style="color:var(--err)">'+friendlyErr(j.err)+'</span>' : (j.stage&&j.status==='running'? j.stage.label : '');
     let acts='<button class="ghost" onclick="showJob(\''+j.id+'\')">详情</button> ';
-    if(j.status==='queued'||j.status==='running') acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'cancel\')">取消</button>';
-    else acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'delete\')">删除</button>';
-    if(j.status==='cancelled'||j.status==='failed'||j.status==='interrupted'||j.status==='saved')
+    if(j.status==='queued'||j.status==='running'){
+      acts+=' <button class="ghost" onclick="reuseJob(\''+j.id+'\')">复制</button>';
+      acts+=' <button class="ghost" onclick="jobAct(\''+j.id+'\',\'cancel\')">取消</button>';
+    }else if(j.clip_rel){
+      acts+=' <button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看</button>';
+      acts+=' <button class="ghost" onclick="reuseJob(\''+j.id+'\')">复制</button>';
+      acts+=' <button class="ghost" onclick="jobAct(\''+j.id+'\',\'delete\')">删除</button>';
+    }else{
+      acts+=' <button class="ghost" onclick="editJob(\''+j.id+'\')">编辑</button>';
       acts+=' <button class="ghost" onclick="retryJob(\''+j.id+'\')">生成</button>';
-    if(j.clip_rel) acts+=' <button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看</button>';
-    acts+=' <button class="ghost" onclick="reuseJob(\''+j.id+'\')">复制</button>';
+      acts+=' <button class="ghost" onclick="reuseJob(\''+j.id+'\')">复制</button>';
+      acts+=' <button class="ghost" onclick="jobAct(\''+j.id+'\',\'delete\')">删除</button>';
+    }
     let thumb='';
     if(j.clip_rel){
       thumb='<video class="jthumb" muted playsinline preload="none" title="'+esc(withExt(j.name||j.id, fileExt(j.clip_rel)))+'" poster="/vthumb/'+encodeURI(j.clip_rel)+
