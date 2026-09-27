@@ -1212,15 +1212,21 @@ class Manager:
                     self._cv.notify()
         return True, ("已提交生成" if queue else "已保存")
 
-    def check_shot_refs(self, refs):
-        """Validate that referenced shots already produced a usable clip."""
+    def check_shot_refs(self, refs, allow_pending=False):
+        """Validate that referenced shots have a clip. With allow_pending, shots
+        that are queued/running are also accepted: jobs run serially, so a shot
+        ahead in the queue always finishes before this one starts."""
         with self.lock:
             for rjid in refs or []:
                 job = self.jobs.get(rjid)
                 if not job:
                     return "所参考的分镜不存在：%s" % rjid
-                if not self._valid_clip(job["st"].get("clip_rel")):
-                    return "所参考的分镜「%s」尚未生成" % (job["st"].get("name") or rjid)
+                st = job["st"]
+                if self._valid_clip(st.get("clip_rel")):
+                    continue
+                if allow_pending and st.get("status") in ("queued", "running"):
+                    continue
+                return "所参考的分镜「%s」尚未生成" % (st.get("name") or rjid)
         return None
 
     def resolve_shot_refs(self, jid, cfg):
@@ -1572,22 +1578,59 @@ class Manager:
         except Exception:
             pass
 
+    def _dependent_ids(self, root):
+        """Ids of jobs that (transitively) reference `root` through shot_refs."""
+        seen, out, stack = {root}, [], [root]
+        while stack:
+            cur = stack.pop()
+            for jid, job in self.jobs.items():
+                if jid in seen:
+                    continue
+                if cur in ((job.get("cfg") or {}).get("shot_refs") or []):
+                    seen.add(jid); out.append(jid); stack.append(jid)
+        return out
+
+    def _cancel_waiting(self, jids):
+        """Cancel queued dependents; ask any running one to stop as well."""
+        done = 0
+        for vid in jids:
+            vjob = self.jobs.get(vid)
+            if not vjob:
+                continue
+            st = vjob["st"]
+            if st.get("status") == "queued":
+                st.update(status="cancelled", ended=NOW(),
+                          duration=int(time.time() - (st.get("run_ts")
+                                                     or st.get("created_ts", time.time()))),
+                          err="参考的分镜已取消")
+                self.persist_status(vjob)
+                self.queue = [x for x in self.queue if x != vid]
+                done += 1
+            elif st.get("status") == "running":
+                st["cancel_requested"] = True
+                self._term(vjob)
+                done += 1
+        return done
+
     def cancel(self, jid):
         with self.lock:
             job = self.jobs.get(jid)
             if not job or job["st"].get("status") not in ("queued", "running"):
                 return False, "分镜不存在或已结束"
+            # cancel everything (transitively) waiting on this shot too
+            n = self._cancel_waiting(self._dependent_ids(jid))
+            extra = ("，并连带取消 %d 个参考它的分镜" % n) if n else ""
             if job["st"]["status"] == "queued":
                 job["st"].update(status="cancelled", ended=NOW(),
                                  duration=int(time.time() - (job["st"].get("run_ts")
                                                             or job["st"].get("created_ts", time.time()))))
                 self.persist_status(job)
                 self.queue = [x for x in self.queue if x != jid]
-                return True, "已取消(排队中)"
+                return True, "已取消(排队中)" + extra
             job["st"]["cancel_requested"] = True
             self._term(job)
         self.comfy.interrupt()
-        return True, "已发送取消"
+        return True, "已发送取消" + extra
 
     def retry(self, jid):
         """Re-queue a finished/failed/cancelled job with its stored parameters."""
@@ -1601,7 +1644,7 @@ class Manager:
             cfg = job.get("cfg")
             if not cfg or not cfg.get("params"):
                 return False, "缺少参数，无法重新生成"
-            serr = self.check_shot_refs(cfg.get("shot_refs") or [])
+            serr = self.check_shot_refs(cfg.get("shot_refs") or [], allow_pending=True)
             if serr:
                 return False, serr
             for k in ("progress", "detail", "clip_rel", "clip_size", "clip_frames",
@@ -2365,7 +2408,7 @@ def make_handler(mgr):
                 if ok:
                     self._err(400, ok); return
                 if not save:
-                    serr = mgr.check_shot_refs(shot_refs)
+                    serr = mgr.check_shot_refs(shot_refs, allow_pending=True)
                     if serr:
                         self._err(400, serr); return
             seed = _to_int(_first(fields, "seed"), None, lo=0, hi=2**63 - 1)
@@ -2865,7 +2908,6 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
       <div class="headacts">
         <button class="primary" id="submitBtn" onclick="submit()">提交</button>
         <button class="ghost" onclick="resetForm()">重置</button>
-        <button class="ghost" id="saveBtn" onclick="saveShot()">保存</button>
         <button class="ghost" onclick="cancelShot()">取消</button>
       </div>
     </div>
@@ -3515,7 +3557,7 @@ async function editJob(id){
   const lost=await fillShotForm(j, j.name||'', id);
   window.scrollTo({top:0, behavior:'smooth'});
   $('submitMsg').textContent='编辑分镜 '+(j.name||id)+(lost?'（部分素材已不在素材库/产物中，已跳过）':'')+
-    '：点「保存」更新，「提交」直接生成，或点「取消」放弃。';
+    '：点「提交」应用修改（参考分镜可用时直接入队，否则仅保存），点「取消」放弃。';
 }
 async function doReuse(id,name){
   const j=jobsById[id]; if(!j) return;
@@ -3591,7 +3633,7 @@ function friendlyStatus(j){
     return parts.join(' · ');
   }
   if(j.status==='failed') return '失败：'+friendlyErr(j.err)+(j.duration!=null?' · 用时 '+fmtDur(j.duration):'');
-  if(j.status==='cancelled') return '已取消'+(j.duration!=null?' · 用时 '+fmtDur(j.duration):'');
+  if(j.status==='cancelled') return '已取消'+(j.err?'：'+friendlyErr(j.err):'')+(j.duration!=null?' · 用时 '+fmtDur(j.duration):'');
   if(j.status==='interrupted') return '已中断(web 重启)，请重新提交';
   return STATUS_CN[j.status]||j.status;
 }
@@ -3627,7 +3669,8 @@ function jobItem(ref){
   return {src:'job', jid:i<0?s:s.slice(0,i), file:i<0?'':s.slice(i+1), ref:ref, name:i<0?s:s.slice(i+1)};
 }
 function shotRefLabel(jid){ const j=jobsById[jid]; return j? (j.name||j.id) : jid; }
-function shotRefReady(jid){ const j=jobsById[jid]; return !!(j && j.status==='done' && j.clip_rel); }
+function shotRefUsable(jid){ const j=jobsById[jid];
+  return !!(j && (j.clip_rel || j.status==='done' || j.status==='queued' || j.status==='running')); }
 function slotItems(kind){
   const mats=selMat[kind].map(matById).filter(Boolean).map(m=>({src:'mat',id:m.id,name:m.name}));
   const clips=selClip[kind].map(rel=>clipsCache.find(c=>c.rel===rel)).filter(Boolean)
@@ -4426,33 +4469,31 @@ function buildShotForm(){
 }
 async function submit(){
   const f=buildShotForm(); if(!f) return;
+  // Queue only when every referenced shot is generated or already pending
+  // (queued/running); otherwise just save the shot to the list for later.
+  let save=false;
   if(f.mode==='ref2v'){
-    const bad=(selShot.ref_video||[]).filter(jid=>!shotRefReady(jid));
-    if(bad.length){ notice('以下参考分镜尚未生成完成：\n'+bad.map(shotRefLabel).join('、')+
-      '\n请等其生成完成后再提交。','参考分镜未生成'); return; }
+    save=!(selShot.ref_video||[]).every(shotRefUsable);
   }
+  if(save) f.fd.append('save', '1');
   const ok=await askConfirm(
     '项目：'+esc(projName(curProject))+(shotName?'<br>分镜：'+esc(shotName):'')+
     '<br>类型：'+(MODE_CN[f.mode]||f.mode)+
     '<br>时长：'+f.dur+'s · 步数：'+f.steps+(f.media?'<br>素材：'+f.media:'')+
-    '<br>提示词：'+esc(f.prompt.slice(0,100))+(f.prompt.length>100?'…':''),
-    '提交分镜','提交');
+    '<br>提示词：'+esc(f.prompt.slice(0,100))+(f.prompt.length>100?'…':'')+
+    (save?'<br><span style="color:var(--warn)">所参考的分镜尚未生成/运行，本次只保存到分镜列表</span>':''),
+    save? '保存分镜':'提交分镜', save? '保存':'提交');
   if(!ok) return;
-  postShot(f.fd, false);
-}
-function saveShot(){
-  const f=buildShotForm(); if(!f) return;
-  f.fd.append('save', '1');
-  postShot(f.fd, true);
+  postShot(f.fd, save);
 }
 function postShot(fd, save){
   const xhr=new XMLHttpRequest(); xhr.open('POST','/api/run');
   $('prog').style.display='block'; $('prog').firstElementChild.style.width='0%';
-  $('submitBtn').disabled=true; if($('saveBtn')) $('saveBtn').disabled=true;
+  $('submitBtn').disabled=true;
   $('submitMsg').textContent= save? '保存中...' : '上传中...';
   xhr.upload.onprogress=(e)=>{ if(e.lengthComputable) $('prog').firstElementChild.style.width=(e.loaded/e.total*100)+'%'; };
   xhr.onload=()=>{
-    $('submitBtn').disabled=false; if($('saveBtn')) $('saveBtn').disabled=false;
+    $('submitBtn').disabled=false;
     try{ const r=JSON.parse(xhr.responseText);
       if(xhr.status===202){ $('submitMsg').textContent= save? ('已保存: '+r.id) : ('已提交: '+r.id);
         $('prompt').value=''; shotName=null; editingJob=null; $('shotLabel').textContent=''; $('taskCard').style.display='none'; }
@@ -4461,7 +4502,7 @@ function postShot(fd, save){
     setTimeout(()=>{ $('prog').style.display='none'; },600);
     refreshJobs();
   };
-  xhr.onerror=()=>{ $('submitBtn').disabled=false; if($('saveBtn')) $('saveBtn').disabled=false; notice('网络错误'); };
+  xhr.onerror=()=>{ $('submitBtn').disabled=false; notice('网络错误'); };
   xhr.send(fd);
 }
 
@@ -4587,9 +4628,9 @@ async function retryJob(id){
   const jb=jobsById[id]||{};
   const refs=(jb.shot_refs||[]);
   if(refs.length){
-    const bad=refs.filter(x=>!shotRefReady(x));
-    if(bad.length){ notice('关联的参考分镜尚未生成完成：\n'+bad.map(shotRefLabel).join('、')+
-      '\n请等其生成完成后再生成。','参考分镜未生成'); return; }
+    const bad=refs.filter(x=>!shotRefUsable(x));
+    if(bad.length){ notice('关联的参考分镜尚未生成，也未在运行：\n'+bad.map(shotRefLabel).join('、')+
+      '\n请先生成或运行这些分镜。','参考分镜不可用'); return; }
   }
   const r=await fetch('/api/jobs/'+id+'/retry',{method:'POST'});
   const j=await r.json().catch(()=>({}));
