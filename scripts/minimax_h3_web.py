@@ -843,6 +843,17 @@ class Manager:
             return cand
         return None
 
+    def job_upload(self, spec):
+        """Resolve 'job:<jid>/<filename>' to a snapshot in <job>/uploads (no traversal)."""
+        jid, _, fn = (spec or "").partition("/")
+        if not jid or not fn or jid not in self.jobs:
+            return None
+        base = os.path.realpath(os.path.join(self._job_dir(jid), "uploads"))
+        cand = os.path.realpath(os.path.join(base, unquote(fn)))
+        if (cand == base or cand.startswith(base + os.sep)) and os.path.isfile(cand):
+            return cand
+        return None
+
     def _thumbs_dir(self, pid):
         return os.path.join(self._proj_dir(pid), "thumbs")
 
@@ -2216,6 +2227,12 @@ def make_handler(mgr):
             for kind in MEDIA_KINDS:
                 paths = []
                 for ref in ids[kind]:
+                    if ref.startswith("job:"):
+                        p = mgr.job_upload(ref[len("job:"):])
+                        if not p:
+                            self._err(400, "复制的参考文件不存在或已被删除：%s" % ref); return
+                        paths.append(p)
+                        continue
                     if kind == "ref_video" and ref.startswith("clip:"):
                         rel = mgr._valid_clip(ref[len("clip:"):])
                         if not rel:
@@ -2232,7 +2249,10 @@ def make_handler(mgr):
                 if not mid:
                     media[kind] = []
                     continue
-                fp = mgr.material_path(project, mid)
+                if mid.startswith("job:"):
+                    fp = mgr.job_upload(mid[len("job:"):])
+                else:
+                    fp = mgr.material_path(project, mid)
                 if not fp:
                     self._err(400, "素材不存在或已被删除：%s" % mid); return
                 media[kind] = [fp]
@@ -2281,7 +2301,12 @@ def make_handler(mgr):
             total_bytes = 0
             for kind in MEDIA_KINDS:
                 for ref, path in zip(ids[kind], media[kind]):
-                    label = os.path.basename(ref[len("clip:"):]) if ref.startswith("clip:") else names.get(ref, ref)
+                    if ref.startswith("clip:"):
+                        label = os.path.basename(ref[len("clip:"):])
+                    elif ref.startswith("job:"):
+                        label = os.path.basename(ref)
+                    else:
+                        label = names.get(ref, ref)
                     try:
                         size = os.path.getsize(path)
                     except OSError:
@@ -3007,6 +3032,7 @@ let editSeq={aspect:'0',fade_in:0,fade_out:0,clips:[]}, editAvail=[], editLast=n
 let materials=[], pickKind=null, pickSel=new Set(), pickSingle=false, pickMode='mat';
 const selMat={ref_image:[],ref_video:[],ref_audio:[],first_frame:[],last_frame:[]};
 const selClip={ref_image:[],ref_video:[],ref_audio:[],first_frame:[],last_frame:[]};
+const selJob={ref_image:[],ref_video:[],ref_audio:[],first_frame:[],last_frame:[]};
 const SLOT_CN={ref_image:{cn:'图片',prefix:'Picture',list:'lImg'},
                ref_video:{cn:'视频',prefix:'Video',list:'lVid'},
                ref_audio:{cn:'音频',prefix:'Audio',list:'lAud'},
@@ -3370,21 +3396,23 @@ async function doReuse(id,name){
   await refreshOutputs();
   clearSelMat();
   const match=(kind)=>{
-    const ids=[], cls=[];
+    const ids=[], cls=[], jobs=[];
     for(const path of (m[kind]||[])){
       const fn=String(path).split('/').pop();
       const mt=materials.find(x=>x.file===fn);
       if(mt){ ids.push(mt.id); continue; }
       const c=clipsCache.find(x=>x.name===fn);
-      if(c) cls.push(c.rel);
+      if(c){ cls.push(c.rel); continue; }
+      if(String(path).indexOf('/uploads/')>=0) jobs.push('job:'+id+'/'+fn);
     }
-    selMat[kind]=ids; selClip[kind]=cls;
+    selMat[kind]=ids; selClip[kind]=cls; selJob[kind]=jobs;
   };
   ['ref_image','ref_video','ref_audio','first_frame','last_frame'].forEach(match);
   renderAllSlots();
   let lost=Object.keys(m).some(k=>Array.isArray(m[k]) && m[k].length && m[k].some(p=>{
     const fn=String(p).split('/').pop();
-    return !materials.some(x=>x.file===fn) && !clipsCache.some(x=>x.name===fn);
+    return !materials.some(x=>x.file===fn) && !clipsCache.some(x=>x.name===fn)
+           && String(p).indexOf('/uploads/')<0;
   }));
   showTaskCard();
   $('submitMsg').textContent='已复制分镜 '+(name||id)+(lost?'（部分素材已不在素材库/产物中，已跳过）':'（未提交）');
@@ -3442,17 +3470,23 @@ function insertRef(prefix, idx){
 function clearSelMat(){
   for(const k in selMat) selMat[k]=[];
   for(const k in selClip) selClip[k]=[];
+  for(const k in selJob) selJob[k]=[];
   renderAllSlots();
 }
 function matById(id){ return materials.find(m=>m.id===id)||null; }
 function matByFile(fn){ return materials.find(m=>m.file===fn)||null; }
+function jobItem(ref){
+  const s=String(ref).slice(4), i=s.indexOf('/');
+  return {src:'job', jid:i<0?s:s.slice(0,i), file:i<0?'':s.slice(i+1), ref:ref, name:i<0?s:s.slice(i+1)};
+}
 function slotItems(kind){
   const mats=selMat[kind].map(matById).filter(Boolean).map(m=>({src:'mat',id:m.id,name:m.name}));
   const clips=selClip[kind].map(rel=>clipsCache.find(c=>c.rel===rel)).filter(Boolean)
                               .map(c=>({src:'clip',rel:c.rel,name:c.name}));
-  return mats.concat(clips);
+  const jobs=(selJob[kind]||[]).map(jobItem);
+  return mats.concat(clips, jobs);
 }
-function itemKey(it){ return it.src==='mat'? ('mat:'+it.id) : ('clip:'+it.rel); }
+function itemKey(it){ return it.src==='mat'? ('mat:'+it.id) : (it.src==='job'? ('job:'+it.jid+'/'+it.file) : ('clip:'+it.rel)); }
 function promptRefRe(prefix){ return new RegExp('<'+prefix+'\\s+(\\d+)>','g'); }
 function promptHasRef(prefix,n){ return new RegExp('<'+prefix+'\\s+'+n+'>').test($('prompt').value); }
 function remapPromptRefs(prefix,mapFn){
@@ -3476,6 +3510,7 @@ function setSlotSelection(kind,newItems){
   }
   selMat[kind]=newItems.filter(it=>it.src==='mat').map(it=>it.id);
   selClip[kind]=newItems.filter(it=>it.src==='clip').map(it=>it.rel);
+  selJob[kind]=newItems.filter(it=>it.src==='job').map(it=>it.ref);
   if(prefix){
     const oldKeyByNum=new Map(oldItems.map((it,i)=>[i+1,itemKey(it)]));
     remapPromptRefs(prefix,n=>{
@@ -3499,6 +3534,10 @@ function renderSlot(kind){
     let pv='';
     if(it.src==='mat'){
       const m=matById(it.id); if(m) pv=matPreview(m,curProject,false);
+    }else if(it.src==='job'){
+      const u='/media/'+encodeURIComponent(it.jid)+'/'+encodeURIComponent(it.file), mk=SLOT_MEDIA[kind];
+      if(mk==='image') pv='<img class="thumb" loading="lazy" src="'+esc(u)+'">';
+      else if(mk==='video') pv='<video class="thumb" muted playsinline preload="none" src="'+esc(u)+'"></video>';
     }else{
       const c=clipsCache.find(x=>x.rel===it.rel);
       if(c) pv='<video class="thumb" muted playsinline preload="none" poster="/vthumb/'+encodeURI(c.rel)+
@@ -3512,6 +3551,9 @@ function renderSlot(kind){
       if(it.src==='mat'){
         const m=matById(it.id);
         if(m) thumb.onclick=()=>viewMaterial(m.id);
+      }else if(it.src==='job'){
+        const u='/media/'+encodeURIComponent(it.jid)+'/'+encodeURIComponent(it.file);
+        thumb.onclick=()=>openViewer(SLOT_MEDIA[kind], it.name, {cap:'原分镜素材', orig:u, src:u});
       }else{
         const c=clipsCache.find(x=>x.rel===it.rel);
         if(c) thumb.onclick=()=>openViewer('video', c.shot||c.name, {cap:'产物', orig:'/files/'+encodeURI(c.rel)});
@@ -4091,11 +4133,11 @@ function pickOk(){
       const c=clipsCache.find(x=>x.rel===rel);
       return c? {src:'clip',rel:c.rel,name:c.name} : null;
     }).filter(Boolean);
-    newItems=old.filter(it=>it.src==='mat').concat(clips);
+    newItems=old.filter(it=>it.src==='mat'||it.src==='job').concat(clips);
   }else{
     const mats=Array.from(pickSel).map(id=>{ const m=matById(id); return m? {src:'mat',id:m.id,name:m.name} : null; })
                               .filter(Boolean);
-    newItems=mats.concat(old.filter(it=>it.src==='clip'));
+    newItems=mats.concat(old.filter(it=>it.src==='clip'||it.src==='job'));
   }
   if(!setSlotSelection(pickKind,newItems)) return;   // blocked by a live prompt reference
   closePick();
@@ -4108,7 +4150,8 @@ function refFiles(kind){
     .map(m=>({name:m.name,size:m.size||0}));
   const clips=slotItems(kind).filter(it=>it.src==='clip').map(it=>clipsCache.find(c=>c.rel===it.rel)).filter(Boolean)
     .map(c=>({name:c.shot||c.name,size:c.size||0}));
-  return mats.concat(clips);
+  const jobs=slotItems(kind).filter(it=>it.src==='job').map(it=>({name:it.name,size:0}));
+  return mats.concat(clips, jobs);
 }
 // MiniMax reference limits; returns an error string or ''
 function checkRefLimits(){
@@ -4149,15 +4192,16 @@ async function submit(){
   const dur=$('dur').value, steps=$('steps').value;
   let media='';
   if(mode==='ref2v'){
-    const imgs=selMat.ref_image, vids=selMat.ref_video.length+selClip.ref_video.length,
-          auds=selMat.ref_audio;
-    if(!imgs.length && !vids && !auds.length){ notice('请至少选择一个参考素材'); return; }
+    const imgs=selMat.ref_image.length+selJob.ref_image.length,
+          vids=selMat.ref_video.length+selClip.ref_video.length+selJob.ref_video.length,
+          auds=selMat.ref_audio.length+selJob.ref_audio.length;
+    if(!imgs && !vids && !auds){ notice('请至少选择一个参考素材'); return; }
     const limErr=checkRefLimits();
     if(limErr){ notice(limErr,'参考素材超限'); return; }
-    media=[imgs.length?imgs.length+'图':null, vids?vids+'视频':null,
-           auds.length?auds.length+'音频':null].filter(Boolean).join(' / ');
+    media=[imgs?imgs+'图':null, vids?vids+'视频':null,
+           auds?auds+'音频':null].filter(Boolean).join(' / ');
   }else{
-    const ff=selMat.first_frame[0], lf=selMat.last_frame[0];
+    const ff=selMat.first_frame[0]||selJob.first_frame[0], lf=selMat.last_frame[0]||selJob.last_frame[0];
     media=[ff?'首帧':null, lf?'尾帧':null].filter(Boolean).join(' + ');
   }
   const ok=await askConfirm(
@@ -4178,12 +4222,15 @@ async function submit(){
   if($('seed').value) fd.append('seed', $('seed').value);
   if(mode==='ref2v'){
     selMat.ref_image.forEach(id=>fd.append('ref_image', id));
+    selJob.ref_image.forEach(ref=>fd.append('ref_image', ref));
     selMat.ref_video.forEach(id=>fd.append('ref_video', id));
     selClip.ref_video.forEach(rel=>fd.append('ref_video', 'clip:'+rel));
+    selJob.ref_video.forEach(ref=>fd.append('ref_video', ref));
     selMat.ref_audio.forEach(id=>fd.append('ref_audio', id));
+    selJob.ref_audio.forEach(ref=>fd.append('ref_audio', ref));
   }else{
-    if(selMat.first_frame[0]) fd.append('first_frame', selMat.first_frame[0]);
-    if(selMat.last_frame[0]) fd.append('last_frame', selMat.last_frame[0]);
+    if(selMat.first_frame[0]||selJob.first_frame[0]) fd.append('first_frame', selMat.first_frame[0]||selJob.first_frame[0]);
+    if(selMat.last_frame[0]||selJob.last_frame[0]) fd.append('last_frame', selMat.last_frame[0]||selJob.last_frame[0]);
   }
   const xhr=new XMLHttpRequest(); xhr.open('POST','/api/run');
   $('prog').style.display='block'; $('prog').firstElementChild.style.width='0%';
@@ -4625,13 +4672,13 @@ async function optimizePrompt(target,btn){
   else if(ta.id==='imgI2IPrompt') kind='i2i';
   else if($('mode').value==='ref2v'){
     kind='ref2v';
-    counts={ref_image:selMat.ref_image.length,
-            ref_video:selMat.ref_video.length+selClip.ref_video.length,
-            ref_audio:selMat.ref_audio.length};
+    counts={ref_image:selMat.ref_image.length+selJob.ref_image.length,
+            ref_video:selMat.ref_video.length+selClip.ref_video.length+selJob.ref_video.length,
+            ref_audio:selMat.ref_audio.length+selJob.ref_audio.length};
   }else{
     kind='fl2v';
-    counts={first_frame:selMat.first_frame.length,
-            last_frame:selMat.last_frame.length};
+    counts={first_frame:selMat.first_frame.length+selJob.first_frame.length,
+            last_frame:selMat.last_frame.length+selJob.last_frame.length};
   }
   $('optText').value=''; $('optMsg').textContent='优化中…';
   if(btn) btn.disabled=true;
