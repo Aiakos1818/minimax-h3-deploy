@@ -2847,7 +2847,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
       <div id="timeline" class="timeline"></div>
     </div>
     <div class="card">
-      <div class="cardhead"><h2>添加片段</h2><span class="muted">点缩略图加入时间线</span></div>
+      <div class="cardhead"><h2>添加片段</h2><span class="muted">点 + 加入时间线，点缩略图放大播放</span></div>
       <div id="pickClips" class="clips"></div>
     </div>
     <div class="editgrid">
@@ -4395,10 +4395,13 @@ function renderPickClips(){
   if(!editAvail.length){ box.innerHTML='<span class="muted">暂无可用产物</span>'; return; }
   box.innerHTML='';
   editAvail.forEach(c=>{
-    const d=document.createElement('div'); d.className='clip'; d.onclick=()=>addClip(c.rel);
-    d.innerHTML='<span class="addclip">+</span><video muted playsinline preload="none" title="'+esc(withExt(c.shot||String(c.name).replace(/\.[^.]+$/,''), fileExt(c.name)))+
+    const label=c.shot||c.job||String(c.name).replace(/\.[^.]+$/,'');
+    const d=document.createElement('div'); d.className='clip';
+    d.innerHTML='<span class="addclip" title="加入时间线">+</span><video muted playsinline preload="none" title="'+esc(withExt(label, fileExt(c.name)))+
       '" poster="/vthumb/'+encodeURI(c.rel)+'" src="/files/'+encodeURI(c.rel)+'"></video>'+
-      '<div class="cap">'+c.name.slice(0,20)+'<br>'+fmtSize(c.size)+'</div>';
+      '<div class="cap">'+esc(label)+'<br>'+fmtSize(c.size)+'</div>';
+    d.onclick=()=>play(c.rel);
+    d.querySelector('.addclip').onclick=(e)=>{ e.stopPropagation(); addClip(c.rel); };
     box.appendChild(d);
   });
 }
@@ -4486,7 +4489,7 @@ async function refreshEditJobs(){
           d.innerHTML='<video muted playsinline preload="none" title="'+esc(withExt(String(j.clip_rel).split('/').pop().replace(/\.[^.]+$/,''), fileExt(j.clip_rel)))+
             '" poster="/vthumb/'+encodeURI(j.clip_rel)+'" src="/files/'+encodeURI(j.clip_rel)+'"></video>'+
             '<div class="cap">'+esc(j.id)+'<br>'+esc(cap)+'</div>'+
-            '<button class="addclip" style="right:auto;left:6px;background:var(--err)" onclick="event.stopPropagation();delEdit(\''+j.id+'\')">删除</button>';
+            '<button class="addclip" style="background:var(--err)" onclick="event.stopPropagation();delEdit(\''+j.id+'\')">删除</button>';
         }else{
           d.innerHTML='<div style="aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;color:var(--mut)">'+esc(STATUS_CN[j.status]||j.status)+'</div>'+
             '<div class="cap">'+esc(j.id)+'<br>'+esc(cap)+'</div>';
