@@ -37,6 +37,7 @@ MATERIAL_EXTS = {".png": "image", ".jpg": "image", ".jpeg": "image", ".webp": "i
 MATERIAL_KIND_CN = {"image": "图片", "video": "视频", "audio": "音频"}
 MATERIAL_MB = {"image": MAX_IMAGE_MB, "video": MAX_VIDEO_MB, "audio": MAX_AUDIO_MB}
 MATERIAL_NAME_MAX = 60
+SHOT_REF_PREFIX = "shotref_"          # snapshot prefix for referenced-shot clips
 THUMB_MAX = 480
 PREVIEW_MAX = 1600
 IMG_ORIG_MAX = 800 * 1024
@@ -1159,13 +1160,13 @@ class Manager:
     def new_id(self):
         return time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:4]
 
-    def submit(self, cfg, jid=None):
+    def submit(self, cfg, jid=None, queue=True):
         with self.lock:
             if jid is None:
                 jid = self.new_id()
             job = {"id": jid, "cfg": cfg, "log": os.path.join(self._job_dir(jid), "log.txt"),
-                   "st": {"id": jid, "status": "queued", "created": NOW(),
-                          "created_ts": time.time(), "tag": jid, "stage": None,
+                   "st": {"id": jid, "status": "queued" if queue else "saved", "created": NOW(),
+                          "created_ts": time.time(), "run_ts": time.time(), "tag": jid, "stage": None,
                           "mode": cfg.get("mode", "ref2v"),
                           "project": cfg.get("project", DEFAULT_PROJECT),
                           "name": cfg.get("name") or None,
@@ -1175,10 +1176,51 @@ class Manager:
             self.jobs[jid] = job
             self.persist_cfg(job)
             self.persist_status(job)
-            self.queue.append(jid)
-            with self._cv:
-                self._cv.notify()
+            if queue:
+                self.queue.append(jid)
+                with self._cv:
+                    self._cv.notify()
             return jid
+
+    def check_shot_refs(self, refs):
+        """Validate that referenced shots already produced a usable clip."""
+        with self.lock:
+            for rjid in refs or []:
+                job = self.jobs.get(rjid)
+                if not job:
+                    return "所参考的分镜不存在：%s" % rjid
+                if not self._valid_clip(job["st"].get("clip_rel")):
+                    return "所参考的分镜「%s」尚未生成" % (job["st"].get("name") or rjid)
+        return None
+
+    def resolve_shot_refs(self, jid, cfg):
+        """Snapshot the clips of cfg['shot_refs'] into <job>/uploads and refresh
+        cfg['media']['ref_video'] so a saved job stays reproducible. Returns an
+        error string when a referenced shot has not been generated yet."""
+        refs = cfg.get("shot_refs") or []
+        if not refs:
+            return None
+        media = cfg.setdefault("media", {})
+        vids = [p for p in (media.get("ref_video") or [])
+                if not os.path.basename(p).startswith(SHOT_REF_PREFIX)]
+        for rjid in refs:
+            job = self.jobs.get(rjid)
+            rel = self._valid_clip(job["st"].get("clip_rel") if job else None)
+            if not rel:
+                media["ref_video"] = vids
+                return "所参考的分镜「%s」尚未生成" % ((job["st"].get("name") if job else None) or rjid)
+            src = os.path.join(self.out_root, rel)
+            ext = os.path.splitext(src)[1] or ".mp4"
+            dst = os.path.join(self._job_dir(jid), "uploads", SHOT_REF_PREFIX + rjid + ext)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if not os.path.exists(dst):
+                try:
+                    os.link(src, dst)
+                except OSError:
+                    shutil.copy2(src, dst)
+            vids.append(dst)
+        media["ref_video"] = vids
+        return None
 
     # ---- worker ----
     def start_worker(self):
@@ -1210,8 +1252,8 @@ class Manager:
                 return
             st = job["st"]
             if key == "status" and value in ("done", "failed", "cancelled", "interrupted") \
-                    and "duration" not in st and st.get("created_ts"):
-                st["duration"] = int(time.time() - st["created_ts"])
+                    and "duration" not in st and (st.get("run_ts") or st.get("created_ts")):
+                st["duration"] = int(time.time() - (st.get("run_ts") or st["created_ts"]))
             st[key] = value
             for k, v in extra.items():
                 st[k] = v
@@ -1300,6 +1342,11 @@ class Manager:
         mode = cfg.get("mode", "ref2v")
         with open(job["log"], "a", encoding="utf-8") as log:
             log.write("=== job %s ===\n" % jid)
+            serr = self.resolve_shot_refs(jid, cfg)
+            if serr:
+                self._set(jid, "status", "failed", ended=NOW(), err=serr)
+                log.write("[web] %s\n" % serr); log.flush(); return
+            self.persist_cfg(job)
             t0 = time.time()
             while mode != "edit" and not self._stop:
                 reasons = self.blocking_busy()
@@ -1363,7 +1410,8 @@ class Manager:
                 frames = self._edit_total_frames(job) if mode == "edit" \
                     else ref2v_length(cfg["params"]["dur"])
                 self._set(jid, "status", "done", ended=NOW(), exit=0, err=None,
-                          duration=int(time.time() - job["st"].get("created_ts", time.time())),
+                          duration=int(time.time() - (job["st"].get("run_ts")
+                                                     or job["st"].get("created_ts", time.time()))),
                           clip_rel=rel if size else None, clip_size=size,
                           clip_frames=frames,
                           clip_seconds=(round(frames / FPS, 2) if frames else None))
@@ -1403,7 +1451,8 @@ class Manager:
             log.write("\n[web] failed: %s\n" % err); return
         rel = os.path.relpath(p, self.out_root).replace("\\", "/")
         self._set(jid, "status", "done", ended=NOW(), exit=0, err=None,
-                  duration=int(time.time() - job["st"].get("created_ts", time.time())),
+                  duration=int(time.time() - (job["st"].get("run_ts")
+                                             or job["st"].get("created_ts", time.time()))),
                   image_rel=rel, clip_size=len(content),
                   material_id=mat["id"], material_name=mat["name"])
         log.write("\n[web] done rc=0 material=%s image=%s size=%d\n"
@@ -1500,7 +1549,8 @@ class Manager:
                 return False, "分镜不存在或已结束"
             if job["st"]["status"] == "queued":
                 job["st"].update(status="cancelled", ended=NOW(),
-                                 duration=int(time.time() - job["st"].get("created_ts", time.time())))
+                                 duration=int(time.time() - (job["st"].get("run_ts")
+                                                            or job["st"].get("created_ts", time.time()))))
                 self.persist_status(job)
                 self.queue = [x for x in self.queue if x != jid]
                 return True, "已取消(排队中)"
@@ -1521,11 +1571,14 @@ class Manager:
             cfg = job.get("cfg")
             if not cfg or not cfg.get("params"):
                 return False, "缺少参数，无法重新生成"
+            serr = self.check_shot_refs(cfg.get("shot_refs") or [])
+            if serr:
+                return False, serr
             for k in ("progress", "detail", "clip_rel", "clip_size", "clip_frames",
                       "clip_seconds", "duration", "ended", "err",
                       "image_rel", "material_id", "material_name"):
                 st.pop(k, None)
-            st.update(status="queued", created=NOW(), created_ts=time.time(),
+            st.update(status="queued", run_ts=time.time(),
                       stage=None, cancel_requested=False, tag=jid)
             cfg["tag"] = jid
             self.persist_cfg(job)
@@ -1565,6 +1618,7 @@ class Manager:
         st = job["st"]
         return {"id": st["id"], "status": st.get("status"), "created": st.get("created"),
                 "created_ts": st.get("created_ts"),
+                "run_ts": st.get("run_ts"),
                 "project": st.get("project") or (job.get("cfg") or {}).get("project") or DEFAULT_PROJECT,
                 "mode": st.get("mode") or (job.get("cfg") or {}).get("mode") or "ref2v",
                 "name": st.get("name") or (job.get("cfg") or {}).get("name") or None,
@@ -1579,6 +1633,7 @@ class Manager:
                 "clip_frames": st.get("clip_frames"), "clip_seconds": st.get("clip_seconds"),
                 "image_rel": st.get("image_rel"),
                 "material_id": st.get("material_id"), "material_name": st.get("material_name"),
+                "shot_refs": list((job.get("cfg") or {}).get("shot_refs") or []),
                 "cancel_requested": bool(st.get("cancel_requested"))}
 
     def state(self):
@@ -1595,7 +1650,7 @@ class Manager:
             lst = [self.info(j) for j in self.jobs.values()
                    if project is None or j["st"].get("project") == project
                    or (j.get("cfg") or {}).get("project") == project]
-        lst.sort(key=lambda x: x.get("created") or "", reverse=True)
+        lst.sort(key=lambda x: (x.get("created_ts") or 0, x.get("created") or ""), reverse=True)
         return lst
 
     def name_taken(self, project, name, keep=None):
@@ -2201,6 +2256,7 @@ def make_handler(mgr):
             mode = _first(fields, "mode", "ref2v")
             if mode not in MODES:
                 mode = "ref2v"
+            save = bool(_first(fields, "save"))
             project = _first(fields, "project", DEFAULT_PROJECT) or DEFAULT_PROJECT
             if project not in mgr.projects:
                 self._err(400, "项目不存在"); return
@@ -2223,26 +2279,37 @@ def make_handler(mgr):
                     self._err(400, "参考生视频不支持首/尾帧"); return
             elif any(n.values()):
                 self._err(400, "文生视频不支持参考素材"); return
-            media = {}
+            media, ref_path, shot_refs = {}, {}, []
             for kind in MEDIA_KINDS:
                 paths = []
                 for ref in ids[kind]:
+                    if ref.startswith("shot:"):
+                        if kind != "ref_video":
+                            self._err(400, "只有参考视频可以选择分镜"); return
+                        rjid = ref[len("shot:"):]
+                        rj = mgr.jobs.get(rjid)
+                        if not rj or (rj["st"].get("mode") or (rj.get("cfg") or {}).get("mode")
+                                      or "ref2v") not in MODES:
+                            self._err(400, "参考分镜不存在：%s" % rjid); return
+                        shot_refs.append(rjid)
+                        continue
                     if ref.startswith("job:"):
                         p = mgr.job_upload(ref[len("job:"):])
                         if not p:
                             self._err(400, "复制的参考文件不存在或已被删除：%s" % ref); return
-                        paths.append(p)
+                        paths.append(p); ref_path[ref] = p
                         continue
                     if kind == "ref_video" and ref.startswith("clip:"):
                         rel = mgr._valid_clip(ref[len("clip:"):])
                         if not rel:
                             self._err(400, "产物不存在或不可用：%s" % ref[len("clip:"):]); return
-                        paths.append(os.path.join(mgr.out_root, rel))
+                        p = os.path.join(mgr.out_root, rel)
+                        paths.append(p); ref_path[ref] = p
                         continue
                     fp = mgr.material_path(project, ref)
                     if not fp:
                         self._err(400, "素材不存在或已被删除：%s" % ref); return
-                    paths.append(fp)
+                    paths.append(fp); ref_path[ref] = fp
                 media[kind] = paths
             for kind in FRAME_KINDS:
                 mid = frame_ids[kind]
@@ -2257,9 +2324,13 @@ def make_handler(mgr):
                     self._err(400, "素材不存在或已被删除：%s" % mid); return
                 media[kind] = [fp]
             if mode == "ref2v":
-                ok = self._check_ref_limits(project, ids, media, n)
+                ok = self._check_ref_limits(project, ids, ref_path, n)
                 if ok:
                     self._err(400, ok); return
+                if not save:
+                    serr = mgr.check_shot_refs(shot_refs)
+                    if serr:
+                        self._err(400, serr); return
             seed = _to_int(_first(fields, "seed"), None, lo=0, hi=2**63 - 1)
             if seed is None:
                 seed = random.randint(0, 2**63 - 1)
@@ -2279,15 +2350,16 @@ def make_handler(mgr):
                     "ref_image_size": "max" if _first(fields, "ref_image_size") == "max" else "match",
                 },
                 "media": media,
+                "shot_refs": shot_refs,
             }
             jid = mgr.new_id()
             cfg["tag"] = jid
             os.makedirs(mgr._job_dir(jid), exist_ok=True)
             mgr.link_refs(jid, cfg)
-            mgr.submit(cfg, jid=jid)
-            self._json(202, {"id": jid, "status": "queued"})
+            mgr.submit(cfg, jid=jid, queue=not save)
+            self._json(202, {"id": jid, "status": "saved" if save else "queued"})
 
-        def _check_ref_limits(self, project, ids, media, n):
+        def _check_ref_limits(self, project, ids, ref_path, n):
             """Validate the MiniMax reference limits; return an error string or None."""
             total = n["ref_image"] + n["ref_video"] + n["ref_audio"]
             if total > MAX_REFS:
@@ -2300,15 +2372,22 @@ def make_handler(mgr):
                      for m in ((mgr.projects.get(project) or {}).get("materials") or [])}
             total_bytes = 0
             for kind in MEDIA_KINDS:
-                for ref, path in zip(ids[kind], media[kind]):
-                    if ref.startswith("clip:"):
-                        label = os.path.basename(ref[len("clip:"):])
-                    elif ref.startswith("job:"):
-                        label = os.path.basename(ref)
+                for ref in ids[kind]:
+                    if ref.startswith("shot:"):
+                        rj = mgr.jobs.get(ref[len("shot:"):])
+                        label = (rj["st"].get("name") if rj else None) or ref[len("shot:"):]
+                        rel = rj["st"].get("clip_rel") if rj else None
+                        path = os.path.join(mgr.out_root, rel) if rel else None
                     else:
-                        label = names.get(ref, ref)
+                        if ref.startswith("clip:"):
+                            label = os.path.basename(ref[len("clip:"):])
+                        elif ref.startswith("job:"):
+                            label = os.path.basename(ref)
+                        else:
+                            label = names.get(ref, ref)
+                        path = ref_path.get(ref)
                     try:
-                        size = os.path.getsize(path)
+                        size = os.path.getsize(path) if path else 0
                     except OSError:
                         size = 0
                     total_bytes += size
@@ -2712,7 +2791,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
             </div>
             <div class="filebox">
               <label>参考视频（≤3，每段 2–15s，合计 ≤15s）</label>
-              <div class="fbact"><button type="button" class="ghost" onclick="openPick('ref_video','clip')">选择产物</button><button type="button" class="ghost" onclick="openPick('ref_video')">选择素材</button></div>
+              <div class="fbact"><button type="button" class="ghost" onclick="openPick('ref_video','shot')">选择分镜</button><button type="button" class="ghost" onclick="openPick('ref_video')">选择素材</button></div>
               <ul id="lVid" class="slotgrid"></ul>
             </div>
             <div class="filebox">
@@ -2744,6 +2823,7 @@ details.matgroup[open]>summary.matgrouphead{margin-bottom:8px}
       <div class="headacts">
         <button class="primary" id="submitBtn" onclick="submit()">提交</button>
         <button class="ghost" onclick="resetForm()">重置</button>
+        <button class="ghost" id="saveBtn" onclick="saveShot()">保存</button>
         <button class="ghost" onclick="cancelShot()">取消</button>
       </div>
     </div>
@@ -3029,10 +3109,11 @@ let shotName = null, shotCb = null, shotMode = 'shot', imgName = null;
 let projects = [], projNames = {}, curProject = null, projectsLoaded = false;
 let clipsCache = [];
 let editSeq={aspect:'0',fade_in:0,fade_out:0,clips:[]}, editAvail=[], editLast=null, editLogOff=0;
-let materials=[], pickKind=null, pickSel=new Set(), pickSingle=false, pickMode='mat';
+let materials=[], pickKind=null, pickSel=new Set(), pickSingle=false, pickMode='mat', pickJobs=[];
 const selMat={ref_image:[],ref_video:[],ref_audio:[],first_frame:[],last_frame:[]};
 const selClip={ref_image:[],ref_video:[],ref_audio:[],first_frame:[],last_frame:[]};
 const selJob={ref_image:[],ref_video:[],ref_audio:[],first_frame:[],last_frame:[]};
+const selShot={ref_image:[],ref_video:[],ref_audio:[],first_frame:[],last_frame:[]};
 const SLOT_CN={ref_image:{cn:'图片',prefix:'Picture',list:'lImg'},
                ref_video:{cn:'视频',prefix:'Video',list:'lVid'},
                ref_audio:{cn:'音频',prefix:'Audio',list:'lAud'},
@@ -3045,7 +3126,7 @@ const MAT_MAX_MB={image:30,video:50,audio:15};
 const MAT_EXT_KIND={png:'image',jpg:'image',jpeg:'image',webp:'image',bmp:'image',gif:'image',
   mp4:'video',mov:'video',webm:'video',mkv:'video',avi:'video',
   mp3:'audio',wav:'audio',m4a:'audio',aac:'audio',flac:'audio',ogg:'audio'};
-const STATUS_CN = {queued:'排队中', running:'进行中', done:'已完成', failed:'失败', cancelled:'已取消', interrupted:'已中断'};
+const STATUS_CN = {queued:'排队中', running:'进行中', done:'已完成', failed:'失败', cancelled:'已取消', interrupted:'已中断', saved:'已保存'};
 const MEDIA_CN = {ref_image:'图', ref_video:'视频', ref_audio:'音频'};
 const MODE_CN = {t2v:'文生视频', ref2v:'参考生视频', edit:'剪辑成片', t2i:'文生图', i2i:'图生图'};
 const GEN_CN = {t2i:'文生图', i2i:'图生图'};
@@ -3365,6 +3446,12 @@ function showJob(id){
       mediaCard(detailMedia(m.init_image, id, j.project, 'image'))+'</div></div></div>';
   }
   h+=mediaSection(id,m,j.project);
+  if(!isImg && (j.shot_refs||[]).length){
+    h+='<div class="matgroups" style="margin-top:14px"><div class="matgroup"><div class="matgrouphead">参考分镜 ('+
+      j.shot_refs.length+')</div><div class="muted">'+
+      j.shot_refs.map(x=>esc(shotRefLabel(x))+'（'+((jobsById[x]&&STATUS_CN[jobsById[x].status])||'未知')+'）').join('、')+
+      '</div></div></div>';
+  }
   $('jBody').innerHTML=h;
   bindMediaCards($('jBody'));
   $('jobModal').classList.add('open');
@@ -3399,6 +3486,7 @@ async function doReuse(id,name){
     const ids=[], cls=[], jobs=[];
     for(const path of (m[kind]||[])){
       const fn=String(path).split('/').pop();
+      if(fn.indexOf('shotref_')===0) continue;   // referenced-shot snapshot, handled below
       const mt=materials.find(x=>x.file===fn);
       if(mt){ ids.push(mt.id); continue; }
       const c=clipsCache.find(x=>x.name===fn);
@@ -3408,6 +3496,7 @@ async function doReuse(id,name){
     selMat[kind]=ids; selClip[kind]=cls; selJob[kind]=jobs;
   };
   ['ref_image','ref_video','ref_audio','first_frame','last_frame'].forEach(match);
+  selShot.ref_video=(j.shot_refs||[]).filter(x=>jobsById[x]);
   renderAllSlots();
   let lost=Object.keys(m).some(k=>Array.isArray(m[k]) && m[k].length && m[k].some(p=>{
     const fn=String(p).split('/').pop();
@@ -3471,6 +3560,7 @@ function clearSelMat(){
   for(const k in selMat) selMat[k]=[];
   for(const k in selClip) selClip[k]=[];
   for(const k in selJob) selJob[k]=[];
+  for(const k in selShot) selShot[k]=[];
   renderAllSlots();
 }
 function matById(id){ return materials.find(m=>m.id===id)||null; }
@@ -3479,14 +3569,19 @@ function jobItem(ref){
   const s=String(ref).slice(4), i=s.indexOf('/');
   return {src:'job', jid:i<0?s:s.slice(0,i), file:i<0?'':s.slice(i+1), ref:ref, name:i<0?s:s.slice(i+1)};
 }
+function shotRefLabel(jid){ const j=jobsById[jid]; return j? (j.name||j.id) : jid; }
+function shotRefReady(jid){ const j=jobsById[jid]; return !!(j && j.status==='done' && j.clip_rel); }
 function slotItems(kind){
   const mats=selMat[kind].map(matById).filter(Boolean).map(m=>({src:'mat',id:m.id,name:m.name}));
   const clips=selClip[kind].map(rel=>clipsCache.find(c=>c.rel===rel)).filter(Boolean)
                               .map(c=>({src:'clip',rel:c.rel,name:c.name}));
   const jobs=(selJob[kind]||[]).map(jobItem);
-  return mats.concat(clips, jobs);
+  const shots=(selShot[kind]||[]).map(jid=>{ const j=jobsById[jid];
+    return {src:'shot', jid, name: shotRefLabel(jid), status: j?j.status:null, clip_rel: j?j.clip_rel:null}; });
+  return mats.concat(clips, jobs, shots);
 }
-function itemKey(it){ return it.src==='mat'? ('mat:'+it.id) : (it.src==='job'? ('job:'+it.jid+'/'+it.file) : ('clip:'+it.rel)); }
+function itemKey(it){ return it.src==='mat'? ('mat:'+it.id) : (it.src==='shot'? ('shot:'+it.jid)
+                     : (it.src==='job'? ('job:'+it.jid+'/'+it.file) : ('clip:'+it.rel))); }
 function promptRefRe(prefix){ return new RegExp('<'+prefix+'\\s+(\\d+)>','g'); }
 function promptHasRef(prefix,n){ return new RegExp('<'+prefix+'\\s+'+n+'>').test($('prompt').value); }
 function remapPromptRefs(prefix,mapFn){
@@ -3511,6 +3606,7 @@ function setSlotSelection(kind,newItems){
   selMat[kind]=newItems.filter(it=>it.src==='mat').map(it=>it.id);
   selClip[kind]=newItems.filter(it=>it.src==='clip').map(it=>it.rel);
   selJob[kind]=newItems.filter(it=>it.src==='job').map(it=>it.ref);
+  selShot[kind]=newItems.filter(it=>it.src==='shot').map(it=>it.jid);
   if(prefix){
     const oldKeyByNum=new Map(oldItems.map((it,i)=>[i+1,itemKey(it)]));
     remapPromptRefs(prefix,n=>{
@@ -3538,6 +3634,10 @@ function renderSlot(kind){
       const u='/media/'+encodeURIComponent(it.jid)+'/'+encodeURIComponent(it.file), mk=SLOT_MEDIA[kind];
       if(mk==='image') pv='<img class="thumb" loading="lazy" src="'+esc(u)+'">';
       else if(mk==='video') pv='<video class="thumb" muted playsinline preload="none" src="'+esc(u)+'"></video>';
+    }else if(it.src==='shot'){
+      if(it.clip_rel) pv='<video class="thumb" muted playsinline preload="none" poster="/vthumb/'+encodeURI(it.clip_rel)+
+             '" src="/files/'+encodeURI(it.clip_rel)+'"></video>';
+      else pv='<div class="thumbicon">'+(STATUS_CN[it.status]||'未生成')+'</div>';
     }else{
       const c=clipsCache.find(x=>x.rel===it.rel);
       if(c) pv='<video class="thumb" muted playsinline preload="none" poster="/vthumb/'+encodeURI(c.rel)+
@@ -3554,6 +3654,8 @@ function renderSlot(kind){
       }else if(it.src==='job'){
         const u='/media/'+encodeURIComponent(it.jid)+'/'+encodeURIComponent(it.file);
         thumb.onclick=()=>openViewer(SLOT_MEDIA[kind], it.name, {cap:'原分镜素材', orig:u, src:u});
+      }else if(it.src==='shot'){
+        if(it.clip_rel) thumb.onclick=()=>openViewer('video', it.name, {cap:'分镜产物', orig:'/files/'+encodeURI(it.clip_rel)});
       }else{
         const c=clipsCache.find(x=>x.rel===it.rel);
         if(c) thumb.onclick=()=>openViewer('video', c.shot||c.name, {cap:'产物', orig:'/files/'+encodeURI(c.rel)});
@@ -3744,9 +3846,9 @@ async function refreshImageJobs(){
     const p=j.params||{};
     const info=[MODE_CN[j.mode]||'', p.megapixels?p.megapixels+'MP':'',
       (j.mode==='i2i'&&p.strength!=null)?('强度 '+p.strength):'', p.steps?p.steps+' 步':''].filter(Boolean).join(' · ');
-    const used=(j.duration!=null)? j.duration : (j.created_ts? Math.max(0, Date.now()/1000-j.created_ts) : null);
+    const used=(j.duration!=null)? j.duration : ((j.run_ts||j.created_ts)? Math.max(0, Date.now()/1000-(j.run_ts||j.created_ts)) : null);
     const usedTxt=(used!=null)? (j.duration!=null? '用时 '+fmtDur(used)
-                                 : '<span data-used="'+j.created_ts+'">用时 '+fmtDur(used)+'</span>') : '';
+                                 : '<span data-used="'+(j.run_ts||j.created_ts)+'">用时 '+fmtDur(used)+'</span>') : '';
     const line2=[info, usedTxt].filter(Boolean).join(' · ');
     const note=j.status==='failed'? '<span style="color:var(--err)">'+friendlyErr(j.err)+'</span>'
              : (j.stage&&j.status==='running'? j.stage.label : '');
@@ -3984,7 +4086,7 @@ function matAddOpen(kind){
   inp.click();
 }
 function pickAddOpen(){
-  if(!$('pickModal').classList.contains('open') || pickMode==='clip') return;
+  if(!$('pickModal').classList.contains('open') || pickMode!=='mat') return;
   const kind=(pickKind==='img_i2i')?'image':SLOT_MEDIA[pickKind];
   if(kind) matAddOpen(kind);
 }
@@ -4058,7 +4160,7 @@ async function deleteMaterial(mid){
 }
 async function openPick(kind, mode){
   if(!curProject){ notice('请先进入一个项目'); return; }
-  pickMode=(mode==='clip')?'clip':'mat';
+  pickMode=(mode==='clip')?'clip':(mode==='shot'?'shot':'mat');
   if(pickMode==='clip'){
     await refreshOutputs();
     if(!clipsCache.length){ notice('该项目还没有产物，先生成或用素材库素材。'); return; }
@@ -4066,6 +4168,16 @@ async function openPick(kind, mode){
     pickSel=new Set(selClip[kind]);
     $('pickTitle').textContent='选择产物 · '+SLOT_CN[kind].cn;
     $('pickHint').textContent='可多选：点选多个产物作为参考视频';
+    $('pickAddBtn').style.display='none';
+  }else if(pickMode==='shot'){
+    const r=await api('/api/jobs?project='+encodeURIComponent(curProject));
+    pickJobs=((r&&r.jobs)||[]).filter(j=>j.mode==='t2v'||j.mode==='ref2v');
+    pickJobs.forEach(j=>{ jobsById[j.id]=j; });
+    if(!pickJobs.length){ notice('该项目还没有分镜，请先添加分镜。'); return; }
+    pickKind=kind; pickSingle=false;
+    pickSel=new Set(selShot[kind]||[]);
+    $('pickTitle').textContent='选择分镜 · '+SLOT_CN[kind].cn;
+    $('pickHint').textContent='可多选：点选多个分镜；未生成或生成中的分镜需等其生成完成后才能提交';
     $('pickAddBtn').style.display='none';
   }else{
     const mk=SLOT_MEDIA[kind];
@@ -4090,6 +4202,26 @@ function togglePick(key){
 }
 function renderPickGrid(){
   const pid=curProject, box=$('pickGrid'); box.innerHTML='';
+  if(pickMode==='shot'){
+    if(!pickJobs.length){ box.innerHTML='<div class="matempty">暂无可用分镜</div>'; return; }
+    pickJobs.forEach(j=>{
+      const on=pickSel.has(j.id);
+      const nm=j.name||j.id;
+      const d=document.createElement('div'); d.className='matcard pick'+(on?' sel':'');
+      d.dataset.key=j.id;
+      d.onclick=()=>togglePick(j.id);
+      let pv;
+      if(j.clip_rel) pv='<video class="thumb" muted playsinline preload="none" poster="/vthumb/'+encodeURI(j.clip_rel)+
+        '" src="/files/'+encodeURI(j.clip_rel)+'"></video>';
+      else pv='<div class="thumbicon">'+(STATUS_CN[j.status]||'未生成')+'</div>';
+      d.innerHTML=(j.name?'<div class="shotname" title="'+esc(nm)+'">'+esc(nm)+'</div>':'')+
+        '<div class="picktag">'+(on?'✓':'')+'</div>'+pv+
+        '<div class="mb"><div class="nm" title="'+esc(nm)+'">'+esc(nm)+'</div>'+
+        '<div class="mm">分镜 · '+(STATUS_CN[j.status]||j.status||'未生成')+'</div></div>';
+      box.appendChild(d);
+    });
+    return;
+  }
   if(pickMode==='clip'){
     if(!clipsCache.length){ box.innerHTML='<div class="matempty">暂无可用产物</div>'; return; }
     clipsCache.forEach(c=>{
@@ -4128,7 +4260,11 @@ function pickOk(){
   }
   const old=slotItems(pickKind);
   let newItems;
-  if(pickMode==='clip'){
+  if(pickMode==='shot'){
+    const shots=Array.from(pickSel).map(jid=>{ const j=jobsById[jid];
+      return {src:'shot', jid, name:j?(j.name||j.id):jid}; });
+    newItems=old.filter(it=>it.src!=='shot').concat(shots);
+  }else if(pickMode==='clip'){
     const clips=Array.from(pickSel).map(rel=>{
       const c=clipsCache.find(x=>x.rel===rel);
       return c? {src:'clip',rel:c.rel,name:c.name} : null;
@@ -4151,7 +4287,9 @@ function refFiles(kind){
   const clips=slotItems(kind).filter(it=>it.src==='clip').map(it=>clipsCache.find(c=>c.rel===it.rel)).filter(Boolean)
     .map(c=>({name:c.shot||c.name,size:c.size||0}));
   const jobs=slotItems(kind).filter(it=>it.src==='job').map(it=>({name:it.name,size:0}));
-  return mats.concat(clips, jobs);
+  const shots=(selShot[kind]||[]).map(jid=>{ const j=jobsById[jid];
+    return {name:shotRefLabel(jid), size:(j&&j.clip_size)||0}; });
+  return mats.concat(clips, jobs, shots);
 }
 // MiniMax reference limits; returns an error string or ''
 function checkRefLimits(){
@@ -4184,33 +4322,26 @@ function onModeChange(){
     : '提示词（可选：从素材库选首帧/尾帧；都不选即纯文生视频）';
 }
 
-async function submit(){
-  if(!curProject){ notice('请先进入一个项目'); goHome(); return; }
+function buildShotForm(){
+  if(!curProject){ notice('请先进入一个项目'); goHome(); return null; }
   const mode=$('mode').value;
   const prompt=$('prompt').value.trim();
-  if(!prompt){ notice('请填写提示词'); return; }
+  if(!prompt){ notice('请填写提示词'); return null; }
   const dur=$('dur').value, steps=$('steps').value;
   let media='';
   if(mode==='ref2v'){
     const imgs=selMat.ref_image.length+selJob.ref_image.length,
-          vids=selMat.ref_video.length+selClip.ref_video.length+selJob.ref_video.length,
+          vids=selMat.ref_video.length+selClip.ref_video.length+selJob.ref_video.length+selShot.ref_video.length,
           auds=selMat.ref_audio.length+selJob.ref_audio.length;
-    if(!imgs && !vids && !auds){ notice('请至少选择一个参考素材'); return; }
+    if(!imgs && !vids && !auds){ notice('请至少选择一个参考素材'); return null; }
     const limErr=checkRefLimits();
-    if(limErr){ notice(limErr,'参考素材超限'); return; }
+    if(limErr){ notice(limErr,'参考素材超限'); return null; }
     media=[imgs?imgs+'图':null, vids?vids+'视频':null,
            auds?auds+'音频':null].filter(Boolean).join(' / ');
   }else{
     const ff=selMat.first_frame[0]||selJob.first_frame[0], lf=selMat.last_frame[0]||selJob.last_frame[0];
     media=[ff?'首帧':null, lf?'尾帧':null].filter(Boolean).join(' + ');
   }
-  const ok=await askConfirm(
-    '项目：'+esc(projName(curProject))+(shotName?'<br>分镜：'+esc(shotName):'')+
-    '<br>类型：'+(MODE_CN[mode]||mode)+
-    '<br>时长：'+dur+'s · 步数：'+steps+(media?'<br>素材：'+media:'')+
-    '<br>提示词：'+esc(prompt.slice(0,100))+(prompt.length>100?'…':''),
-    '提交分镜','提交');
-  if(!ok) return;
   const fd=new FormData();
   fd.append('project', curProject);
   fd.append('mode', mode);
@@ -4226,27 +4357,53 @@ async function submit(){
     selMat.ref_video.forEach(id=>fd.append('ref_video', id));
     selClip.ref_video.forEach(rel=>fd.append('ref_video', 'clip:'+rel));
     selJob.ref_video.forEach(ref=>fd.append('ref_video', ref));
+    selShot.ref_video.forEach(jid=>fd.append('ref_video', 'shot:'+jid));
     selMat.ref_audio.forEach(id=>fd.append('ref_audio', id));
     selJob.ref_audio.forEach(ref=>fd.append('ref_audio', ref));
   }else{
     if(selMat.first_frame[0]||selJob.first_frame[0]) fd.append('first_frame', selMat.first_frame[0]||selJob.first_frame[0]);
     if(selMat.last_frame[0]||selJob.last_frame[0]) fd.append('last_frame', selMat.last_frame[0]||selJob.last_frame[0]);
   }
+  return {fd, mode, media, prompt, dur, steps};
+}
+async function submit(){
+  const f=buildShotForm(); if(!f) return;
+  if(f.mode==='ref2v'){
+    const bad=(selShot.ref_video||[]).filter(jid=>!shotRefReady(jid));
+    if(bad.length){ notice('以下参考分镜尚未生成完成：\n'+bad.map(shotRefLabel).join('、')+
+      '\n请等其生成完成后再提交。','参考分镜未生成'); return; }
+  }
+  const ok=await askConfirm(
+    '项目：'+esc(projName(curProject))+(shotName?'<br>分镜：'+esc(shotName):'')+
+    '<br>类型：'+(MODE_CN[f.mode]||f.mode)+
+    '<br>时长：'+f.dur+'s · 步数：'+f.steps+(f.media?'<br>素材：'+f.media:'')+
+    '<br>提示词：'+esc(f.prompt.slice(0,100))+(f.prompt.length>100?'…':''),
+    '提交分镜','提交');
+  if(!ok) return;
+  postShot(f.fd, false);
+}
+function saveShot(){
+  const f=buildShotForm(); if(!f) return;
+  f.fd.append('save', '1');
+  postShot(f.fd, true);
+}
+function postShot(fd, save){
   const xhr=new XMLHttpRequest(); xhr.open('POST','/api/run');
   $('prog').style.display='block'; $('prog').firstElementChild.style.width='0%';
-  $('submitBtn').disabled=true; $('submitMsg').textContent='上传中...';
+  $('submitBtn').disabled=true; if($('saveBtn')) $('saveBtn').disabled=true;
+  $('submitMsg').textContent= save? '保存中...' : '上传中...';
   xhr.upload.onprogress=(e)=>{ if(e.lengthComputable) $('prog').firstElementChild.style.width=(e.loaded/e.total*100)+'%'; };
   xhr.onload=()=>{
-    $('submitBtn').disabled=false;
+    $('submitBtn').disabled=false; if($('saveBtn')) $('saveBtn').disabled=false;
     try{ const r=JSON.parse(xhr.responseText);
-      if(xhr.status===202){ $('submitMsg').textContent='已提交: '+r.id; $('prompt').value='';
-        shotName=null; $('shotLabel').textContent=''; $('taskCard').style.display='none'; }
-      else notice('提交失败: '+(r.error||xhr.status));
-    }catch(e){ notice('提交失败: '+xhr.status); }
+      if(xhr.status===202){ $('submitMsg').textContent= save? ('已保存: '+r.id) : ('已提交: '+r.id);
+        $('prompt').value=''; shotName=null; $('shotLabel').textContent=''; $('taskCard').style.display='none'; }
+      else notice((save?'保存失败: ':'提交失败: ')+(r.error||xhr.status));
+    }catch(e){ notice((save?'保存失败: ':'提交失败: ')+xhr.status); }
     setTimeout(()=>{ $('prog').style.display='none'; },600);
     refreshJobs();
   };
-  xhr.onerror=()=>{ $('submitBtn').disabled=false; notice('网络错误'); };
+  xhr.onerror=()=>{ $('submitBtn').disabled=false; if($('saveBtn')) $('saveBtn').disabled=false; notice('网络错误'); };
   xhr.send(fd);
 }
 
@@ -4325,15 +4482,15 @@ async function refreshJobs(){
     const d=document.createElement('div'); d.className='job';
     const p=j.params||{};
     const info=[mediaBrief(j.media), p.dur?p.dur+'s':'', p.megapixels?p.megapixels+'MP':''].filter(Boolean).join(' · ');
-    const used = (j.duration!=null)? j.duration : (j.created_ts? Math.max(0, Date.now()/1000-j.created_ts) : null);
+    const used = (j.duration!=null)? j.duration : ((j.run_ts||j.created_ts)? Math.max(0, Date.now()/1000-(j.run_ts||j.created_ts)) : null);
     const usedTxt = (used!=null)? (j.duration!=null? '用时 '+fmtDur(used)
-                                 : '<span data-used="'+j.created_ts+'">用时 '+fmtDur(used)+'</span>') : '';
+                                 : '<span data-used="'+(j.run_ts||j.created_ts)+'">用时 '+fmtDur(used)+'</span>') : '';
     const line2 = [MODE_CN[j.mode]||'', info, usedTxt].filter(Boolean).join(' · ');
     const note = j.status==='failed'? '<span style="color:var(--err)">'+friendlyErr(j.err)+'</span>' : (j.stage&&j.status==='running'? j.stage.label : '');
     let acts='<button class="ghost" onclick="showJob(\''+j.id+'\')">详情</button> ';
     if(j.status==='queued'||j.status==='running') acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'cancel\')">取消</button>';
     else acts+='<button class="ghost" onclick="jobAct(\''+j.id+'\',\'delete\')">删除</button>';
-    if(j.status==='cancelled'||j.status==='failed'||j.status==='interrupted')
+    if(j.status==='cancelled'||j.status==='failed'||j.status==='interrupted'||j.status==='saved')
       acts+=' <button class="ghost" onclick="retryJob(\''+j.id+'\')">生成</button>';
     if(j.clip_rel) acts+=' <button class="ghost" onclick="play(\''+j.clip_rel+'\')">查看</button>';
     acts+=' <button class="ghost" onclick="reuseJob(\''+j.id+'\')">复制</button>';
@@ -4361,6 +4518,13 @@ async function refreshJobs(){
 }
 
 async function retryJob(id){
+  const jb=jobsById[id]||{};
+  const refs=(jb.shot_refs||[]);
+  if(refs.length){
+    const bad=refs.filter(x=>!shotRefReady(x));
+    if(bad.length){ notice('关联的参考分镜尚未生成完成：\n'+bad.map(shotRefLabel).join('、')+
+      '\n请等其生成完成后再生成。','参考分镜未生成'); return; }
+  }
   const r=await fetch('/api/jobs/'+id+'/retry',{method:'POST'});
   const j=await r.json().catch(()=>({}));
   if(!r.ok){ notice('生成失败：'+(j.msg||j.error||r.status)); return; }
@@ -4673,7 +4837,7 @@ async function optimizePrompt(target,btn){
   else if($('mode').value==='ref2v'){
     kind='ref2v';
     counts={ref_image:selMat.ref_image.length+selJob.ref_image.length,
-            ref_video:selMat.ref_video.length+selClip.ref_video.length+selJob.ref_video.length,
+            ref_video:selMat.ref_video.length+selClip.ref_video.length+selJob.ref_video.length+selShot.ref_video.length,
             ref_audio:selMat.ref_audio.length+selJob.ref_audio.length};
   }else{
     kind='fl2v';
